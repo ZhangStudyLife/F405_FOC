@@ -13,7 +13,10 @@ validation/
 *.ioc.bak
 
 # ---- 编辑器 / IDE ----
-.vscode/
+# .vscode 只忽略个人化设置;c_cpp_properties.json 是本工程专属的 IntelliSense
+# 配置(ARM GCC 路径、STM32 宏、includePath),必须随项目走,否则换机器就满屏红线
+.vscode/*
+!.vscode/c_cpp_properties.json
 .idea/
 *.swp
 *.swo

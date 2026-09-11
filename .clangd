@@ -1,0 +1,22 @@
+# clangd 配置(对应 STM32CubeIDE 自带的 clangd 扩展)
+# CMake 已生成 compile_commands.json;让 clangd 用上它,并按 ARM 目标解析。
+CompileFlags:
+  # 指向编译数据库。clangd 会从被打开的文件向上查找 .clangd,
+  # 所以放在工程根目录即可覆盖 Core/ 与 Drivers/ 下的所有源文件。
+  CompilationDatabase: build/Debug
+
+  # 必须授予 arm-none-eabi-gcc 查询权限:
+  # clangd 是 x86 的 clang,默认不认识 ARM 交叉编译器的系统头文件目录,
+  # 不加这项会满屏 "stdint.h not found" 之类的假报错。
+  # 注意:query-driver 列表里的可执行文件会以当前用户权限被执行,
+  # 这里只允许本机已确认的工具链,不要放宽成通配路径。
+  #
+  # 同时剔除硬浮点 ABI 标志:-mfloat-abi=hard 对 x86 主机上的 clang
+  # 是致命错误,clangd 嗅探 ARM 目标后并不需要它来定位头文件。
+  Remove:
+    - -mfloat-abi=hard
+    - -mfpu=fpv4-sp-d16
+  QueryDriver: D:/DevEnv/GNU-tools-for-STM32/bin/arm-none-eabi-*
+
+Index:
+  Background: Build
