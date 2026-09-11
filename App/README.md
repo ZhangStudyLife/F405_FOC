@@ -315,26 +315,38 @@ SWD 单次读变量要几毫秒，顶多采到几百 Hz，而 FOC 是 20 kHz —
 
 ### 用法
 
+**看波形用带界面的上位机**（双击 `tools/run_scope_gui.bat`，或
+`python tools/scope_gui.py`）：实时刷新、可调窗口长度、支持冻结/存图/导出 CSV。
+
+命令行抓一帧用 `python tools/scope_capture.py`。
+
 ```python
-# 1) 固件里（已在 main.c 的 bring-up 段落接好）
+# 固件里（已在 main.c 的 bring-up 段落接好）
 scope_t g_scope;                          # 全局，主机靠符号名找它
 scope_init(&g_scope, 20000u);             # 20 kHz
 
-# 2) 控制中断里
+# 控制中断里
 int32_t v[SCOPE_CHANNELS] = { ia, ib, angle, id, iq, duty };
 scope_push(&g_scope, v);
 
-# 3) 出故障时冻结，保留触发前的历史（预触发捕获）
+# 出故障时冻结，保留触发前的历史（预触发捕获）
 if (fault) scope_freeze(&g_scope);
 ```
 
-```bash
-python tools/scope_capture.py                          # 抓一次并弹图
-python tools/scope_capture.py --freeze                 # 先冻结再抓（看故障瞬间）
-python tools/scope_capture.py --save fig.png --csv cap.csv
-python tools/scope_capture.py --names ia,ib,ic,angle,id,iq
-python tools/scope_capture.py --repeat 5 --interval 2  # 连续抓 5 次
-```
+### 刷新率：SWD 带宽是硬上限
+
+主机用 OpenOCD 的 `dump_image` 整块搬内存，实测：
+
+| 窗口 | 单帧 | 刷新率 |
+|---|---|---|
+| 1024 样本（24 KB） | 237 ms | 4.2 Hz |
+| 256 样本（6 KB） | 59 ms | **16.9 Hz** |
+| 128 样本（3 KB） | 33 ms | **30.4 Hz** |
+
+所以上位机默认开 256 样本窗口（约 17 Hz，看趋势足够），要看细节时切到 1024。
+
+> 早期版本每次抓取都要 fork 一个 GDB（约 1 秒开销），换成 OpenOCD 的常驻
+> telnet 连接后快了约 10 倍 —— 现在 CLI 抓一帧加存图总共 1.4 秒。
 
 ### 设计要点
 
