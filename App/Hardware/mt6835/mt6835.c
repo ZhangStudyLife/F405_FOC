@@ -10,6 +10,18 @@
 
 #include "mt6835.h"
 
+/*
+ * 热路径上的小函数一律强制内联。
+ * 在 -Os（Release）下 GCC 多数会自己内联，但 Debug 的 -O0 不会——
+ * 这个标注让两种构建下的时序行为尽量一致，也省掉每次多圈展开、
+ * 每个 CRC 字节的函数调用开销。
+ */
+#if defined(__GNUC__)
+#define MT6835_ALWAYS_INLINE  static inline __attribute__((always_inline))
+#else
+#define MT6835_ALWAYS_INLINE  static inline
+#endif
+
 /* ========================================================================== */
 /* 内部常量                                                                    */
 /* ========================================================================== */
@@ -42,7 +54,7 @@ static const uint8_t k_crc8_nibble[16] = {
     0x38u, 0x3Fu, 0x36u, 0x31u, 0x24u, 0x23u, 0x2Au, 0x2Du
 };
 
-static uint8_t crc8_step(uint8_t crc, uint8_t data)
+MT6835_ALWAYS_INLINE uint8_t crc8_step(uint8_t crc, uint8_t data)
 {
     crc ^= data;
     crc = (uint8_t)((uint8_t)(crc << 4) ^ k_crc8_nibble[crc >> 4]);
@@ -101,7 +113,7 @@ static mt6835_status_t mt6835_frame(mt6835_t *dev,
     return st;
 }
 
-static void mt6835_track_turns(mt6835_t *dev, uint32_t raw)
+MT6835_ALWAYS_INLINE void mt6835_track_turns(mt6835_t *dev, uint32_t raw)
 {
     int32_t delta;
 
@@ -302,8 +314,12 @@ mt6835_status_t mt6835_probe(mt6835_t *dev, uint8_t *user_id)
    保证两种用法在 CRC 判据、多圈更新、故障标志上的行为完全一致。 */
 static mt6835_status_t mt6835_decode_frame(mt6835_t *dev, const uint8_t *rx)
 {
-    uint32_t raw    = mt6835_decode_angle(rx);
-    uint8_t  status = mt6835_decode_status(rx);
+    /* 就地拼装，不调 mt6835_decode_angle/status —— 那两个是公开 API，
+       热路径上没必要为两次移位各付一次函数调用开销。 */
+    const uint32_t raw    = ((uint32_t)rx[2] << 13)
+                          | ((uint32_t)rx[3] << 5)
+                          | ((uint32_t)rx[4] >> 3);
+    const uint8_t  status = (uint8_t)(rx[4] & 0x07u);
 
 #if (MT6835_ENABLE_CRC != 0)
     if (dev->check_crc && (mt6835_crc8(raw, status) != rx[5])) {

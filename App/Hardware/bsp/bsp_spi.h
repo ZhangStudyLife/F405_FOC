@@ -11,24 +11,28 @@
   * ---------------------------------------------------------------------------
   * 实测对比（Release，SPI3 = 10.5 MHz，读 MT6835 一帧 48 bit）
   * ---------------------------------------------------------------------------
-  *   SPI 线上时间（物理下限）        4.29 us
-  *   HAL_SPI_TransmitReceive 阻塞    17.0 us   ← 原始实现，占 20 kHz 周期 34%
-  *   本模块 bsp_spi_transfer 阻塞    11.2 us   ← 逐字节轮询 SPI3->SR
-  *   DMA 阻塞（start 后立即 wait）    8.6 us
-  *   DMA 异步（start + 干活 + wait）  4.4 us CPU，线上时间被完全掩盖
+  *   SPI 线上时间（物理下限）        4.19 us
+  *   HAL_SPI_TransmitReceive 阻塞    17.0 us   ← 最初实现，占 20 kHz 周期 34%
+  *   bsp_spi_transfer 寄存器轮询     11.2 us
+  *   DMA 阻塞（start 后立即 wait）    7.69 us   ← 1.31 启动 + 4.19 线上 + 2.04 收尾
+  *   DMA 异步（start + 干活 + wait）  3.35 us CPU，线上时间被完全掩盖（占周期 6.7%）
   *
-  * **结论是 DMA 反而比轮询快**，原因有点反直觉：SPI3 挂在 APB1（42 MHz）上，
-  * 逐字节轮询 SPI3->SR 要承担很高的总线访问延迟；而 DMA1 的状态寄存器在
-  * AHB1 上，轮询 TCIF 几乎零开销。所以驱动默认两条路都走 DMA。
+  * 两个反直觉的结论：
+  *   1. **DMA 比寄存器轮询快**。SPI3 挂在 APB1(42 MHz) 上，逐字节轮询 SPI3->SR
+  *      每次都要付 AHB-APB 桥延迟；而 DMA 流寄存器和 DMA1->LISR 都在 AHB1 上，
+  *      几乎零开销。
+  *   2. **真正的瓶颈是 APB1 访问次数**。把热路径上的 APB1 访问从 6 次减到 0 次
+  *      （收尾不读 SR、start 不改 CR1/CR2、SPE/DMAEN 一次性永久打开），
+  *      单这一步就省下约 1.5 us。
   *
   * bsp_spi_transfer()（寄存器轮询）保留下来，作为 port 没提供 DMA 时的兜底，
   * 以及低速配置寄存器访问（对实时性无要求）的实现。
   *
-  * 20 kHz 控制环推荐用 DMA 异步版，把 4.29 us 线上时间藏进 FOC 运算里：
+  * 20 kHz 控制环推荐用 DMA 异步版，把 4.19 us 线上时间藏进 FOC 运算里：
   *
-  *     mt6835_read_start(&enc);       // 1.6 us，SPI 开始在后台搬数据
+  *     mt6835_read_start(&enc);       // 1.3 us，SPI 开始在后台搬数据
   *     ... Clarke/Park/PI/SVPWM 运算 ...
-  *     mt6835_read_finish(&enc);      // 2.8 us，数据早就到了
+  *     mt6835_read_finish(&enc);      // 2.0 us，数据早就到了
   ******************************************************************************
   */
 
@@ -61,6 +65,7 @@ typedef struct {
     uint32_t timeout_ms;  /**< 兼容字段；寄存器级实现改用内部循环计数保护 */
     bool     dma_ready;   /**< bsp_spi_dma_init() 是否成功 */
     bool     dma_busy;    /**< 是否有 DMA 传输在进行中 */
+    bool     dma_need_flush; /**< 上次传输可能残留 RXNE/OVR，下次 start 前需清 */
 } bsp_spi_t;
 
 /**

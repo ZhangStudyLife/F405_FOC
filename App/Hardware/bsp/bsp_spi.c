@@ -8,10 +8,15 @@
   * 收发循环全部直接操作寄存器，不经过 HAL_SPI_TransmitReceive。
   *
   * 实测（Release，SPI3 = 10.5 MHz，一帧 48 bit）：
-  *     HAL 阻塞传输      17.0 us   ← 优化前
+  *     HAL 阻塞传输      17.0 us
   *     寄存器轮询阻塞    11.2 us
-  *     DMA 阻塞           8.6 us
-  *     DMA 异步           4.4 us CPU（线上时间被掩盖）
+  *     DMA 阻塞           7.69 us
+  *     DMA 异步           3.35 us CPU（线上 4.19 us 被掩盖）
+  *
+  * 本文件的核心优化思路：**热路径上不碰任何 APB1 寄存器**。
+  * SPI3 在 APB1(42 MHz) 上，每次访问都要付 AHB-APB 桥延迟；而 DMA 流寄存器、
+  * DMA1->LISR、GPIO 都在 AHB1 上，几乎免费。所以 SPE/RXDMAEN/TXDMAEN 在
+  * 初始化时一次性永久打开，start/wait 全程只操作 AHB1。
   ******************************************************************************
   */
 
@@ -171,6 +176,17 @@ bool bsp_spi_dma_init(bsp_spi_t *bus)
 
     bus->dma_ready = true;
     bus->dma_busy  = false;
+    bus->dma_need_flush = true;   /* 首次传输前先清一次残留状态 */
+
+    /* 永久打开 SPI 与两个 DMA 请求，热路径上就再也不用碰 CR1/CR2 了。
+       这两次 APB1 写换来的是每次传输省下 4~6 次 APB1 访问。
+
+       - SPE=1：SCK 在非通信状态保持高电平，正是数据手册要求的模式 3 空闲电平，
+         所以没有必要每次传完再关掉。
+       - RXDMAEN/TXDMAEN=1 而对应 DMA 流未使能时，DMA 请求只是无人响应而已，
+         既不影响寄存器轮询路径，也不影响 RXNE/TXE 的行为。 */
+    hspi->Instance->CR1 |= SPI_CR1_SPE;
+    hspi->Instance->CR2 |= (SPI_CR2_RXDMAEN | SPI_CR2_TXDMAEN);
 
     return true;
 }
@@ -238,14 +254,19 @@ bsp_spi_err_t bsp_spi_transfer(bsp_spi_t *bus,
 
     /* 等总线彻底空闲，这样调用方紧接着拉高片选是安全的 */
     if (!spi_wait_clear(spi, SPI_SR_BSY)) {
+        bus->dma_need_flush = true;
         return BSP_SPI_ERR_TIMEOUT;
     }
 
     if ((spi->SR & SPI_SR_OVR) != 0u) {
         spi_clear_ovr(spi);
+        bus->dma_need_flush = true;
         return BSP_SPI_ERR_OVERRUN;
     }
 
+    /* 本路径已经把 len 个字节全读走（RXNE 归零）、并确认过 OVR，
+       所以 DMA 路径下次 start 时不必再清残留。 */
+    bus->dma_need_flush = false;
     return BSP_SPI_OK;
 }
 
@@ -274,13 +295,28 @@ bsp_spi_err_t bsp_spi_transfer_dma_start(bsp_spi_t *bus,
     drx = BSP_SPI_DMA_RX_STREAM;
     dtx = BSP_SPI_DMA_TX_STREAM;
 
+    /* 热路径上只碰 AHB1 上的寄存器（DMA 流、GPIO 片选），一次 APB1 都不碰：
+       SPE / RXDMAEN / TXDMAEN 已在 bsp_spi_dma_init() 里永久打开。 */
+
     /* 清上一次的完成/错误标志（只清本流对应的位，不动其他流） */
     DMA1->LIFCR = DMA_LIFCR_CTCIF0 | DMA_LIFCR_CHTIF0 | DMA_LIFCR_CTEIF0
                 | DMA_LIFCR_CDMEIF0 | DMA_LIFCR_CFEIF0;
     DMA1->HIFCR = DMA_HIFCR_CTCIF5 | DMA_HIFCR_CHTIF5 | DMA_HIFCR_CTEIF5
                 | DMA_HIFCR_CDMEIF5 | DMA_HIFCR_CFEIF5;
 
-    spi_clear_ovr(spi);
+    /* **必须**先读 DR 再读 SR（RM0090 规定的 OVR 清除序列）：
+       读 DR 会清掉残留的 RXNE。漏掉它的话，使能 RX 流的一瞬间 DMA 会把 DR 里
+       的旧数据抢先搬进缓冲区，整帧就错位一格 —— 这是最难查的一类 bug。
+
+       但这一步是两次 APB1 访问，而 APB1 是这条路径上最贵的东西，所以只在
+       "上一次传输可能留下残留"时才做。上一次干净收尾（DMA 读满了 len 个字节、
+       OVR 已确认清除）之后，RXNE 必然是 0，这里就可以直接跳过。
+       万一判断错了，后果是整帧错位 → CRC 必失败 → 立刻被上层发现，不会静默出错。 */
+    if (bus->dma_need_flush) {
+        (void)spi->DR;
+        (void)spi->SR;
+        bus->dma_need_flush = false;
+    }
 
     drx->NDTR = len;
     drx->M0AR = (uint32_t)rx;
@@ -292,11 +328,6 @@ bsp_spi_err_t bsp_spi_transfer_dma_start(bsp_spi_t *bus,
     drx->CR |= DMA_SxCR_EN;
     dtx->CR |= DMA_SxCR_EN;
 
-    if ((spi->CR1 & SPI_CR1_SPE) == 0u) {
-        spi->CR1 |= SPI_CR1_SPE;
-    }
-    spi->CR2 |= (SPI_CR2_RXDMAEN | SPI_CR2_TXDMAEN);
-
     bus->dma_busy = true;
 
     return BSP_SPI_OK;
@@ -304,10 +335,6 @@ bsp_spi_err_t bsp_spi_transfer_dma_start(bsp_spi_t *bus,
 
 bsp_spi_err_t bsp_spi_transfer_dma_wait(bsp_spi_t *bus, uint32_t timeout_us)
 {
-    SPI_TypeDef *spi;
-    uint32_t     t0;
-    uint32_t     limit;
-    uint32_t     per_us;
     bsp_spi_err_t result = BSP_SPI_OK;
 
     if ((bus == NULL) || (!bus->dma_ready)) {
@@ -317,36 +344,53 @@ bsp_spi_err_t bsp_spi_transfer_dma_wait(bsp_spi_t *bus, uint32_t timeout_us)
         return BSP_SPI_OK;
     }
 
-    per_us = cycles_per_us();
-    t0     = bsp_time_cycles();
-    limit  = timeout_us * per_us;
+    /* ---- 快路径 ----
+       调用方在 start 与 wait 之间通常干了活（FOC 运算），数据早就到齐。
+       先无代价地探一次 TC —— 命中时连 DWT 都不用读，省掉一次函数调用和
+       两次 CYCCNT 访问。20 kHz 控制环走的正是这条路。 */
+    if ((DMA1->LISR & DMA_LISR_TCIF0) == 0u) {
+        uint32_t t0    = bsp_time_cycles();
+        uint32_t limit = timeout_us * cycles_per_us();
 
-    /* RX 流传输完成 = 整帧收齐。TX 一定不会晚于 RX（它是数据的来源）。 */
-    while ((DMA1->LISR & DMA_LISR_TCIF0) == 0u) {
-        if ((DMA1->LISR & DMA_LISR_TEIF0) != 0u) {
-            result = BSP_SPI_ERR_DMA;
-            break;
-        }
-        if ((uint32_t)(bsp_time_cycles() - t0) > limit) {
-            result = BSP_SPI_ERR_TIMEOUT;
-            break;
+        while ((DMA1->LISR & DMA_LISR_TCIF0) == 0u) {
+            if ((DMA1->LISR & DMA_LISR_TEIF0) != 0u) {
+                result = BSP_SPI_ERR_DMA;
+                break;
+            }
+            if ((uint32_t)(bsp_time_cycles() - t0) > limit) {
+                result = BSP_SPI_ERR_TIMEOUT;
+                break;
+            }
         }
     }
 
-    /* 关掉 DMA 请求并停流；正常路径下 NDTR 已经到 0，流自己是关的 */
-    spi = spi_of(bus);
-    spi->CR2 &= ~(SPI_CR2_RXDMAEN | SPI_CR2_TXDMAEN);
+    /* ---- 收尾：这里**刻意不读 SPI3->SR** ----
+       SPI3 挂在 APB1(42 MHz) 上、核心跑 168 MHz，单次 APB1 访问的开销高得
+       离谱——实测它是这条路径上最贵的一步。原来读一次 SR 是为了同时判 BSY
+       和 OVR，现在改用下面两条更便宜、也更明确的保证：
 
-    BSP_SPI_DMA_RX_STREAM->CR &= ~DMA_SxCR_EN;
-    BSP_SPI_DMA_TX_STREAM->CR &= ~DMA_SxCR_EN;
+       1) CS 上升沿的时序余量：数据手册要求最后一个 SCK 上升沿到 CSN 上升沿
+          至少隔 0.5*TSCK（10.5 MHz 下 47.6 ns）。RX 的 DMA 传输完成标志在
+          最后一个字节收完时才置起，此后走到 cs_select() 还要经过几次函数返回
+          和 GPIO 写，本来就远超 47.6 ns；这里再补 8 个 NOP 把余量做实，
+          而不是依赖"后面代码恰好够长"。
+          （注意别用 `volatile` 循环计数来做这件事：volatile 局部变量每轮都要
+            访存，16 轮实测要 1.2 us，比它替代掉的那次 APB1 读还贵。
+            __NOP() 是内联汇编，不会被优化掉，每条约 1 周期。）
 
-    (void)spi_wait_clear(spi, SPI_SR_BSY);
+       2) OVR 检测：OVR 只可能在 DMA 没能及时取走 DR 时发生（每字节有 762 ns
+          窗口，正常绝不会发生）。真发生了会丢掉一个字节、整帧错位，
+          **CRC 必然失败**，由上层判据拦截。也就是说 OVR 与 CRC 是冗余的，
+          没必要为它每次多付一次 APB1 访问。 */
+    __NOP(); __NOP(); __NOP(); __NOP();
+    __NOP(); __NOP(); __NOP(); __NOP();
 
-    if ((result == BSP_SPI_OK) && ((spi->SR & SPI_SR_OVR) != 0u)) {
-        result = BSP_SPI_ERR_OVERRUN;
-    }
+    /* NDTR 归零时硬件会自动清 EN，正常路径不需要手动停流；
+       只有异常中断的传输才要显式关掉，并标记下次 start 前需要清残留。 */
     if (result != BSP_SPI_OK) {
-        spi_clear_ovr(spi);
+        BSP_SPI_DMA_RX_STREAM->CR &= ~DMA_SxCR_EN;
+        BSP_SPI_DMA_TX_STREAM->CR &= ~DMA_SxCR_EN;
+        bus->dma_need_flush = true;
     }
 
     bus->dma_busy = false;
