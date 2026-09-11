@@ -1,26 +1,34 @@
 /**
   ******************************************************************************
   * @file    bsp_spi.h
-  * @brief   SPI 总线抽象：一次全双工收发，返回本层自己的错误码。
+  * @brief   SPI 总线抽象：寄存器级快速收发 + DMA 异步收发。
   *
   * 设计要点：
   *   - 头文件里没有 HAL 类型：句柄用 void* 承载，真实类型是 SPI_HandleTypeDef*。
   *   - 错误码是本层定义的枚举，不透传 HAL_StatusTypeDef，上层不需要认识 HAL。
-  *   - 传输失败后主动复位 HAL 状态机。HAL 的阻塞式传输一旦超时返回，
-  *     hspi->State 可能停在 BUSY，之后所有调用都会立刻失败——表现为"第一次
-  *     偶发超时之后编码器就彻底读不到了"。这里把它变成可自愈。
+  *   - 收发走**寄存器级实现**，不调 HAL_SPI_TransmitReceive。
   *
-  * 关于性能（实测，非估算）：本模块提供的是阻塞式传输。在 10.5 MHz 下读 MT6835
-  * 一帧 48 bit 的**线上时间只有 4.57 us**，但上板实测整个 mt6835_read() 要花
-  * **17.0 us**（2856 周期 @168 MHz）——大头不是线上时间，而是 HAL 对每个字节
-  * 都要走一次 SPI_WaitFlagStateUntilTimeout（6 字节 = 12 次等待）。
-  * 这已占 20 kHz (50 us) 控制周期的 34%，属于"能跑但没余量"。
+  * ---------------------------------------------------------------------------
+  * 实测对比（Release，SPI3 = 10.5 MHz，读 MT6835 一帧 48 bit）
+  * ---------------------------------------------------------------------------
+  *   SPI 线上时间（物理下限）        4.29 us
+  *   HAL_SPI_TransmitReceive 阻塞    17.0 us   ← 原始实现，占 20 kHz 周期 34%
+  *   本模块 bsp_spi_transfer 阻塞    11.2 us   ← 逐字节轮询 SPI3->SR
+  *   DMA 阻塞（start 后立即 wait）    8.6 us
+  *   DMA 异步（start + 干活 + wait）  4.4 us CPU，线上时间被完全掩盖
   *
-  * 因此本模块是**性能瓶颈的所在地**，也是优化的落点。三个候选方向：
-  *   1. 在本文件内实现寄存器级快路径（绕过 HAL 逐字节轮询）→ 预期约 5~6 us；
-  *   2. 启用 SPI3 DMA，把 4.57 us 线上时间藏进 FOC 运算 → 预期阻塞约 2~3 us；
-  *   3. 数据宽度改 16 bit，等待次数减半 → 预期约 11~12 us。
-  * 取舍与具体步骤见 App/README.md 第 4 节。
+  * **结论是 DMA 反而比轮询快**，原因有点反直觉：SPI3 挂在 APB1（42 MHz）上，
+  * 逐字节轮询 SPI3->SR 要承担很高的总线访问延迟；而 DMA1 的状态寄存器在
+  * AHB1 上，轮询 TCIF 几乎零开销。所以驱动默认两条路都走 DMA。
+  *
+  * bsp_spi_transfer()（寄存器轮询）保留下来，作为 port 没提供 DMA 时的兜底，
+  * 以及低速配置寄存器访问（对实时性无要求）的实现。
+  *
+  * 20 kHz 控制环推荐用 DMA 异步版，把 4.29 us 线上时间藏进 FOC 运算里：
+  *
+  *     mt6835_read_start(&enc);       // 1.6 us，SPI 开始在后台搬数据
+  *     ... Clarke/Park/PI/SVPWM 运算 ...
+  *     mt6835_read_finish(&enc);      // 2.8 us，数据早就到了
   ******************************************************************************
   */
 
@@ -39,33 +47,37 @@ extern "C" {
 typedef enum {
     BSP_SPI_OK = 0,
     BSP_SPI_ERR_NOT_BOUND,   /**< 句柄为空或参数非法 */
-    BSP_SPI_ERR_BUSY,        /**< 总线被占用 */
-    BSP_SPI_ERR_TIMEOUT,     /**< 超时：从机没应答，通常是接线或芯片未上电 */
-    BSP_SPI_ERR_OVERRUN,     /**< 接收溢出：主机没及时取走数据 */
+    BSP_SPI_ERR_BUSY,        /**< 上一次传输还没结束 */
+    BSP_SPI_ERR_TIMEOUT,     /**< 等待标志位超时 */
+    BSP_SPI_ERR_OVERRUN,     /**< 接收溢出：数据没被及时取走 */
     BSP_SPI_ERR_MODE,        /**< 模式/标志位错误（含 MODF/FRE） */
-    BSP_SPI_ERR_DMA,
+    BSP_SPI_ERR_DMA,         /**< DMA 传输错误 */
     BSP_SPI_ERR_OTHER
 } bsp_spi_err_t;
 
 /** @brief 一条 SPI 总线。 */
 typedef struct {
     void    *hspi;        /**< 实际类型 SPI_HandleTypeDef* */
-    uint32_t timeout_ms;  /**< 单次传输的 HAL 超时；建议 1 ms 量级，别用 HAL_MAX_DELAY */
+    uint32_t timeout_ms;  /**< 兼容字段；寄存器级实现改用内部循环计数保护 */
+    bool     dma_ready;   /**< bsp_spi_dma_init() 是否成功 */
+    bool     dma_busy;    /**< 是否有 DMA 传输在进行中 */
 } bsp_spi_t;
 
 /**
   * @brief  绑定一条已由 CubeMX 初始化好的 SPI 总线。
   * @param  hspi        SPI_HandleTypeDef*（以 void* 传入以隔离 HAL 类型）
-  * @param  timeout_ms  单次传输超时。一帧 6 字节在 10.5 MHz 下只需 5 us，
-  *                     1 ms 已是三个数量级的余量；设太大只会在故障时白等。
+  * @param  timeout_ms  故障保护时长（仅用于 DMA 等待）
   */
 void bsp_spi_bind(bsp_spi_t *bus, void *hspi, uint32_t timeout_ms);
 
+/* -------------------------------------------------------------------------- */
+/* 阻塞路径                                                                    */
+/* -------------------------------------------------------------------------- */
+
 /**
-  * @brief  全双工收发 len 个字节（阻塞）。
+  * @brief  全双工收发 len 个字节（阻塞，寄存器级实现）。
   * @param  tx  发送缓冲，len 字节
   * @param  rx  接收缓冲，len 字节
-  * @retval BSP_SPI_OK 成功；其余为失败原因
   * @note   SPI 是全双工：想读 N 字节就必须同时写 N 字节，写 0x00 即可。
   *         本函数不操作片选，片选由调用方（驱动层）控制，这样才能保证
   *         整个帧在一次片选低电平内完成。
@@ -74,6 +86,42 @@ bsp_spi_err_t bsp_spi_transfer(bsp_spi_t *bus,
                                const uint8_t *tx,
                                uint8_t       *rx,
                                uint16_t       len);
+
+/* -------------------------------------------------------------------------- */
+/* DMA 异步路径                                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+  * @brief  初始化 DMA 通道（把 SPI 的收发绑到 DMA 流上）。
+  * @retval true  DMA 可用，随后可以走 start/wait
+  * @note   只需调用一次，通常在板级 port 绑定时。不依赖 CubeMX 的 DMA 配置，
+  *         全部在本层用寄存器配置，因此改 .ioc 重新生成代码不会影响它。
+  */
+bool bsp_spi_dma_init(bsp_spi_t *bus);
+
+/** @brief DMA 是否已就绪。 */
+bool bsp_spi_dma_available(const bsp_spi_t *bus);
+
+/**
+  * @brief  发起一次 DMA 收发，立即返回。
+  * @note   调用方负责片选：**必须在调用前拉低片选，并在 wait 返回后才释放**，
+  *         因为 DMA 期间片选必须一直保持有效。
+  */
+bsp_spi_err_t bsp_spi_transfer_dma_start(bsp_spi_t *bus,
+                                         const uint8_t *tx,
+                                         uint8_t       *rx,
+                                         uint16_t       len);
+
+/**
+  * @brief  等待 DMA 收发完成。
+  * @param  timeout_us 超时（微秒）
+  * @note   若 start 与 wait 之间做了别的工作（例如 FOC 运算），
+  *         线上时间就被完全藏起来了，本函数几乎立即返回。
+  */
+bsp_spi_err_t bsp_spi_transfer_dma_wait(bsp_spi_t *bus, uint32_t timeout_us);
+
+/** @brief 是否有 DMA 传输正在进行。 */
+bool bsp_spi_dma_busy(const bsp_spi_t *bus);
 
 #ifdef __cplusplus
 }
