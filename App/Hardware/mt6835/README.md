@@ -247,8 +247,10 @@ if (|delta| > 2^20)  delta ±= 2^21;
 |---|---|
 | `g_mt6835_raw` | 最近一次有效采样的原始 21 bit 角度 |
 | `g_mt6835_err` | `0` = 正常；否则为 `mt6835_status_t + 1` |
-| `g_mt6835_read_ns` | 单次 `mt6835_read()` 的耗时（纳秒），**评估 SPI 效率就看它** |
+| `g_mt6835_read_ns` | 同步阻塞读的耗时（纳秒），**评估 SPI 效率就看它** |
 | `g_mt6835_read_cycles` | 同上，原始 CPU 周期 |
+| `g_mt6835_async_start_ns` | 异步 `mt6835_read_start()` 的 CPU 开销 |
+| `g_mt6835_async_finish_ns` | 异步 `mt6835_read_finish()` 的开销（bring-up 里中间插了 6 µs 模拟运算） |
 | `g_mt6835_loops` | 轮询次数 |
 | `g_mt6835_status` | 传感器告警位（bit0 超速 / bit1 弱磁 / bit2 欠压） |
 
