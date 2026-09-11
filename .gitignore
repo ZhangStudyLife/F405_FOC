@@ -1,0 +1,25 @@
+# ---- 构建产物 ----
+# CMake/Ninja 生成目录(build/Debug、build/Release),含 CMakeCache、compile_commands.json、
+# .elf/.bin/.hex/.map 等,全部可由 CMakeLists.txt 重新生成
+build/
+
+# ---- 本地分析产物 ----
+# CubeMX 配置排查与验证留下的日志/脚本,非工程组成部分,但本地保留备查
+validation/
+
+# ---- CubeMX 备份 ----
+# 修改 .ioc 前自动/手动留的备份,真正生效的是 405_FOC.ioc
+*.ioc.original.bak
+*.ioc.bak
+
+# ---- 编辑器 / IDE ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- 操作系统 ----
+Thumbs.db
+Desktop.ini
+.DS_Store
