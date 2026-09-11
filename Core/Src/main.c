@@ -25,7 +25,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "bsp_time.h"
+#include "mt6835.h"
+#include "mt6835_port_stm32.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -35,6 +37,12 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+/* MT6835 上板自检（bring-up）开关。
+   置 1：主循环以约 1 kHz 轮询编码器，把原始角度和单次读取耗时暴露成全局变量，
+         可直接用 GDB 观察 —— 用于验证接线、校验 CRC、实测 SPI 效率。
+   置 0：整段自检代码消失，主循环恢复为空，交给后续的 FOC 调度。 */
+#define MT6835_BRINGUP 1
 
 /* USER CODE END PD */
 
@@ -46,7 +54,14 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+/* ---- MT6835 bring-up 观测变量（供 GDB 读取，不参与控制） ---- */
+mt6835_t         g_mt6835;
+volatile uint32_t g_mt6835_raw;           /* 最近一次有效采样的原始 21 bit 角度 */
+volatile uint32_t g_mt6835_err;           /* 0 = 正常；否则为 mt6835_status_t + 1 */
+volatile uint32_t g_mt6835_read_cycles;   /* 单次 mt6835_read() 占用的 CPU 周期 */
+volatile uint32_t g_mt6835_read_ns;       /* 同上，换算成纳秒 */
+volatile uint32_t g_mt6835_loops;         /* 轮询次数，用来确认循环真的在跑 */
+volatile uint32_t g_mt6835_status;        /* 传感器状态位（超速/弱磁/欠压） */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -94,7 +109,16 @@ int main(void)
   MX_ADC2_Init();
   MX_SPI3_Init();
   /* USER CODE BEGIN 2 */
+  /* DWT 周期计数器：必须在任何 bsp_time_* 之前初始化一次 */
+  bsp_time_init();
 
+#if MT6835_BRINGUP
+  /* 绑定 SPI3 + PA0 并建链（内部含上电等待与重试，约 20~30 ms） */
+  if (!mt6835_port_stm32_bind(&g_mt6835, &hspi3,
+                              MT6835_CS_GPIO_Port, MT6835_CS_Pin)) {
+    g_mt6835_err = 1u;   /* 建链失败：排查见 App/Hardware/mt6835/README.md */
+  }
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -104,6 +128,31 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+#if MT6835_BRINGUP
+    /* 约 1 kHz 轮询编码器。这段只用于上板自检：
+         - g_mt6835_raw     手动转动磁钢时应平滑变化，范围 [0, 2097152)
+         - g_mt6835_err     应恒为 0（CRC 失败 = 6，总线超时 = 5，参数错 = 2）
+         - g_mt6835_read_ns 即单次 48-bit 突发读的真实耗时，用来评估 SPI 效率
+       实时控制请把 MT6835_BRINGUP 置 0 关掉，改由 ADC 注入中断按 20 kHz 驱动。 */
+    {
+      uint32_t        t0 = bsp_time_cycles();
+      mt6835_status_t st = mt6835_read(&g_mt6835);
+      uint32_t        dt = bsp_time_cycles() - t0;
+
+      g_mt6835_read_cycles = dt;
+      g_mt6835_read_ns     = bsp_time_cycles_to_ns(dt);
+
+      if (st == MT6835_OK) {
+        g_mt6835_err    = 0u;
+        g_mt6835_raw    = mt6835_raw(&g_mt6835);
+        g_mt6835_status = mt6835_status(&g_mt6835);
+      } else {
+        g_mt6835_err = (uint32_t)st + 1u;
+      }
+      g_mt6835_loops++;
+    }
+    HAL_Delay(1);
+#endif
   }
   /* USER CODE END 3 */
 }
