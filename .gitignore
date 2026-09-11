@@ -12,6 +12,11 @@ validation/
 *.ioc.original.bak
 *.ioc.bak
 
+# ---- 调试工具产物 ----
+# tools/scope_capture.py 的默认输出（波形图），每次抓取都会重新生成
+scope.png
+scope*.csv
+
 # ---- 编辑器 / IDE ----
 # .vscode 只忽略个人化设置;c_cpp_properties.json 是本工程专属的 IntelliSense
 # 配置(ARM GCC 路径、STM32 宏、includePath),必须随项目走,否则换机器就满屏红线

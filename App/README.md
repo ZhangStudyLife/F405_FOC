@@ -293,7 +293,70 @@ TIM8 (中心对齐, ARR=4200, 20 kHz)
 
 ---
 
-## 8. 构建
+## 8. 调试与观测：没有串口怎么看波形
+
+这块板子只有 SWD，没有串口。而且 **OpenOCD 对当前这颗 ST-Link 只提供
+`hla_swd` / `hla_jtag` 两种传输，HLA 驱动不支持 SWO** —— 所以 ITM/printf
+那条路在现有工具链下是走不通的（要用 SWO 得换 ST 官方的 ST-LINK GDB server，
+且 PB3 必须已引到调试口；本工程 `.ioc` 里没有任何 Trace 配置）。
+
+### 结论：不要"实时读变量"，要让目标板自己采样
+
+SWD 单次读变量要几毫秒，顶多采到几百 Hz，而 FOC 是 20 kHz ——
+用它看波形只会看到混叠后的假信号。**正确做法是反过来**：
+
+```
+目标板：控制中断里以全速把信号写进 RAM 环形缓冲（scope_push，约 25 周期）
+        ↓  SWD 整块内存搬运（GDB dump binary memory，一次几毫秒）
+主机：  tools/scope_capture.py 解析 + matplotlib 绘图 / 导出 CSV
+```
+
+时间分辨率是**真正的采样率**，不受调试链路带宽限制。
+
+### 用法
+
+```python
+# 1) 固件里（已在 main.c 的 bring-up 段落接好）
+scope_t g_scope;                          # 全局，主机靠符号名找它
+scope_init(&g_scope, 20000u);             # 20 kHz
+
+# 2) 控制中断里
+int32_t v[SCOPE_CHANNELS] = { ia, ib, angle, id, iq, duty };
+scope_push(&g_scope, v);
+
+# 3) 出故障时冻结，保留触发前的历史（预触发捕获）
+if (fault) scope_freeze(&g_scope);
+```
+
+```bash
+python tools/scope_capture.py                          # 抓一次并弹图
+python tools/scope_capture.py --freeze                 # 先冻结再抓（看故障瞬间）
+python tools/scope_capture.py --save fig.png --csv cap.csv
+python tools/scope_capture.py --names ia,ib,ic,angle,id,iq
+python tools/scope_capture.py --repeat 5 --interval 2  # 连续抓 5 次
+```
+
+### 设计要点
+
+- 头部固定 8 个 `uint32`（32 字节），**没有位域和指针**，主机按固定布局解析，
+  不会踩到对齐填充的坑；主机先从头部读出 channels/depth，再决定搬多少字节，
+  所以改 `SCOPE_CHANNELS`/`SCOPE_DEPTH` 后**主机脚本不用动**。
+- 环形回绕用位与（要求 `SCOPE_DEPTH` 是 2 的幂），不用取模 ——
+  这个函数每 50 µs 跑一次，取模在 M4 上要几十个周期。
+- `write_index` 在数据写完之后才更新：主机若正好在写过程中搬运，
+  最多丢掉最新一个不完整的样本，不会读到错位状态。
+- 时间轴以 **t=0 = 最新样本**为基准，冻结时 t=0 就是触发点，便于对齐故障瞬间。
+- 默认 6 通道 × 1024 样本 = 24 KB RAM（F405 有 128 KB）。不要就改小，
+  或在 CMake 里覆盖 `SCOPE_CHANNELS` / `SCOPE_DEPTH`。
+
+> ⚠️ GDB(Windows 版) 的 `dump binary memory` **不接受带引号的路径**，
+  也不认相对路径 —— 加了引号会把引号当文件名的一部分而报
+  `No such file or directory`。脚本里用绝对路径 + 正斜杠 + 不加引号，
+> 并显式挑了不含空格的目录。
+
+---
+
+## 9. 构建
 
 统一走工程既有的脚本（不要把完整构建日志贴回来，脚本已经做了摘要）：
 

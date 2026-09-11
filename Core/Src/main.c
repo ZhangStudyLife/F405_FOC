@@ -28,6 +28,7 @@
 #include "bsp_time.h"
 #include "mt6835.h"
 #include "mt6835_port_stm32.h"
+#include "scope.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -64,6 +65,14 @@ volatile uint32_t g_mt6835_async_start_ns;  /* read_start（发起 DMA）的 CPU
 volatile uint32_t g_mt6835_async_finish_ns; /* 中间插了 6us 模拟运算后 finish 的开销 */
 volatile uint32_t g_mt6835_loops;         /* 轮询次数，用来确认循环真的在跑 */
 volatile uint32_t g_mt6835_status;        /* 传感器状态位（超速/弱磁/欠压） */
+
+/* ---- RAM 示波器：目标板自己采样，主机用 tools/scope_capture.py 经 SWD 抓走 ----
+   通道分配（bring-up 阶段）：
+     ch0 = 原始 21 bit 角度   ch1 = 同步阻塞读耗时 ns
+     ch2 = 异步 start ns      ch3 = 异步 finish ns
+     ch4 = 芯片给的 CRC       ch5 = 轮询计数（斜坡，用来确认采样连续）
+   转动电机轴时 ch0 应该是平滑锯齿，ch1~ch3 应该是三条水平线。 */
+scope_t          g_scope;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -121,6 +130,10 @@ int main(void)
     g_mt6835_err = 1u;   /* 建链失败：排查见 App/Hardware/mt6835/README.md */
   }
 #endif
+
+  /* RAM 示波器：采样率就是下面主循环的轮询频率（约 1 kHz）。
+     真正跑 FOC 时改成 20000，并在 ADC 注入中断里调 scope_push()。 */
+  scope_init(&g_scope, 1000u);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -174,6 +187,18 @@ int main(void)
         g_mt6835_status = 0u;
       }
       g_mt6835_loops++;
+
+      /* 推一组样本进 RAM 示波器（约 25 周期，对控制环无影响） */
+      {
+        int32_t sv[SCOPE_CHANNELS];
+        sv[0] = (int32_t)g_mt6835_raw;
+        sv[1] = (int32_t)g_mt6835_read_ns;
+        sv[2] = (int32_t)g_mt6835_async_start_ns;
+        sv[3] = (int32_t)g_mt6835_async_finish_ns;
+        sv[4] = (int32_t)g_mt6835.sample.crc;
+        sv[5] = (int32_t)g_mt6835_loops;
+        scope_push(&g_scope, sv);
+      }
     }
     HAL_Delay(1);
 #endif
