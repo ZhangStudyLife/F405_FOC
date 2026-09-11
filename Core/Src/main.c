@@ -58,8 +58,10 @@
 mt6835_t         g_mt6835;
 volatile uint32_t g_mt6835_raw;           /* 最近一次有效采样的原始 21 bit 角度 */
 volatile uint32_t g_mt6835_err;           /* 0 = 正常；否则为 mt6835_status_t + 1 */
-volatile uint32_t g_mt6835_read_cycles;   /* 单次 mt6835_read() 占用的 CPU 周期 */
-volatile uint32_t g_mt6835_read_ns;       /* 同上，换算成纳秒 */
+volatile uint32_t g_mt6835_read_cycles;   /* 同步阻塞读占用的 CPU 周期 */
+volatile uint32_t g_mt6835_read_ns;       /* 同步阻塞读耗时（优化前 17035 ns） */
+volatile uint32_t g_mt6835_async_start_ns;  /* read_start（发起 DMA）的 CPU 开销 */
+volatile uint32_t g_mt6835_async_finish_ns; /* 中间插了 6us 模拟运算后 finish 的开销 */
 volatile uint32_t g_mt6835_loops;         /* 轮询次数，用来确认循环真的在跑 */
 volatile uint32_t g_mt6835_status;        /* 传感器状态位（超速/弱磁/欠压） */
 /* USER CODE END PV */
@@ -129,25 +131,47 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 #if MT6835_BRINGUP
-    /* 约 1 kHz 轮询编码器。这段只用于上板自检：
-         - g_mt6835_raw     手动转动磁钢时应平滑变化，范围 [0, 2097152)
-         - g_mt6835_err     应恒为 0（CRC 失败 = 6，总线超时 = 5，参数错 = 2）
-         - g_mt6835_read_ns 即单次 48-bit 突发读的真实耗时，用来评估 SPI 效率
+    /* 约 1 kHz 轮询编码器，同时对比阻塞路径与 DMA 异步路径的开销。
+         - g_mt6835_read_ns        同步阻塞读（寄存器级快路径）
+         - g_mt6835_async_start_ns 发起 DMA 的 CPU 开销
+         - g_mt6835_async_finish_ns 中间插了 6us "模拟 FOC 运算" 后收取结果的开销
        实时控制请把 MT6835_BRINGUP 置 0 关掉，改由 ADC 注入中断按 20 kHz 驱动。 */
     {
-      uint32_t        t0 = bsp_time_cycles();
-      mt6835_status_t st = mt6835_read(&g_mt6835);
-      uint32_t        dt = bsp_time_cycles() - t0;
+      uint32_t        t0;
+      uint32_t        dt;
+      mt6835_status_t st;
 
+      /* --- 1) 同步阻塞读 --- */
+      t0 = bsp_time_cycles();
+      (void)mt6835_read(&g_mt6835);
+      dt = bsp_time_cycles() - t0;
       g_mt6835_read_cycles = dt;
       g_mt6835_read_ns     = bsp_time_cycles_to_ns(dt);
+
+      /* --- 2) 异步 DMA 读：start 之后先干别的活，再收结果 --- */
+      t0 = bsp_time_cycles();
+      st = mt6835_read_start(&g_mt6835);
+      g_mt6835_async_start_ns = bsp_time_cycles_to_ns(bsp_time_cycles() - t0);
+
+      if (st == MT6835_OK) {
+        /* 这段时间 SPI 在后台搬数据，等价于 FOC 的 Clarke/Park/PI/SVPWM 运算 */
+        bsp_time_delay_us(6u);
+
+        t0 = bsp_time_cycles();
+        st = mt6835_read_finish(&g_mt6835);
+        g_mt6835_async_finish_ns = bsp_time_cycles_to_ns(bsp_time_cycles() - t0);
+      } else {
+        g_mt6835_async_finish_ns = 0u;
+        g_mt6835_err = 0xFFFFFFFFu;   /* 异步发起就失败了，单独标记 */
+      }
 
       if (st == MT6835_OK) {
         g_mt6835_err    = 0u;
         g_mt6835_raw    = mt6835_raw(&g_mt6835);
         g_mt6835_status = mt6835_status(&g_mt6835);
-      } else {
-        g_mt6835_err = (uint32_t)st + 1u;
+      } else if (g_mt6835_err != 0xFFFFFFFFu) {
+        g_mt6835_err    = (uint32_t)st + 1u;
+        g_mt6835_status = 0u;
       }
       g_mt6835_loops++;
     }

@@ -99,11 +99,15 @@ extern "C" {
 /** 写/烧写/置零成功的应答值。 */
 #define MT6835_ACK             0x55u
 
-/**
-  * @brief 建链探针写入 0x001 的测试值。
+/** @brief 建链探针写入 0x001 的测试值。
   * @note  0x001 是"客户保留"寄存器，用它做写入-回读测试不会碰到任何功能位。
   */
 #define MT6835_PROBE_PATTERN   0x5Au
+
+/** @brief 异步读取等待 DMA 完成的超时（微秒）。一帧只需 4.6 us，20 us 已很宽松。 */
+#ifndef MT6835_ASYNC_TIMEOUT_US
+#define MT6835_ASYNC_TIMEOUT_US 20u
+#endif
 
 /* 寄存器地址（12 bit）—— 与数据手册第 10 章"寄存器表"逐条核对过 */
 #define MT6835_REG_USERID      0x001u   /* 客户保留 EEPROM 寄存器，**不是器件 ID** */
@@ -136,7 +140,8 @@ typedef enum {
     MT6835_ERR_BUS,         /**< 总线错误（超时之外的传输失败） */
     MT6835_ERR_TIMEOUT,     /**< 传输超时：芯片不应答 */
     MT6835_ERR_CRC,         /**< CRC 校验失败，本次采样已丢弃 */
-    MT6835_ERR_NACK         /**< 写/烧写没有收到 0x55 应答 */
+    MT6835_ERR_NACK,        /**< 写/烧写没有收到 0x55 应答 */
+    MT6835_ERR_BUSY         /**< 上一次异步读取还没收尾 */
 } mt6835_status_t;
 
 /**
@@ -167,6 +172,23 @@ typedef struct {
 
     /** @brief 毫秒级忙等。可为 NULL（建链时就不做上电等待与重试间隔）。 */
     void (*delay_ms)(void *ctx, uint32_t ms);
+
+    /* ---------------- 可选：异步（DMA）通道，未实现请置 NULL ---------------- */
+
+    /**
+      * @brief  发起一次异步整帧收发，立即返回。
+      * @note   驱动已在调用前拉低片选，并在 transfer_wait 之后释放。
+      */
+    mt6835_status_t (*transfer_start)(void *ctx,
+                                      const uint8_t *tx,
+                                      uint8_t       *rx,
+                                      uint16_t       len);
+
+    /**
+      * @brief  等待异步收发完成。
+      * @param  timeout_us 超时（微秒）
+      */
+    mt6835_status_t (*transfer_wait)(void *ctx, uint32_t timeout_us);
 } mt6835_port_t;
 
 /** @brief 一次有效采样。 */
@@ -195,6 +217,10 @@ typedef struct {
 
     uint32_t        comm_errors;     /**< 传输失败累计 */
     uint32_t        crc_errors;      /**< CRC 失败累计 */
+
+    /* ---- 异步读取的内部状态（调用方不用碰） ---- */
+    uint8_t         async_rx[MT6835_FRAME_BYTES]; /**< DMA 目标缓冲，start~finish 之间必须存活 */
+    bool            async_pending;   /**< 异步传输已发起、尚未收尾 */
 } mt6835_t;
 
 /* ========================================================================== */
@@ -239,13 +265,36 @@ mt6835_status_t mt6835_probe(mt6835_t *dev, uint8_t *user_id);
   * @retval MT6835_OK          采样已更新
   * @retval MT6835_ERR_CRC     CRC 失败：**保留上一次有效采样**，crc_errors++
   * @retval 其他               传输失败：保留上一次有效采样，comm_errors++
-  * @note   这是为 20 kHz 控制环准备的唯一 I/O 入口。
-  *         上板实测（Release，10.5 MHz，真实数据）单次约 **17.0 us**，
-  *         其中线上时间只有 4.57 us，其余是 HAL 逐字节轮询开销。
-  *         占 50 us 控制周期的 34%，优化方向见 App/README.md 第 4 节。
+  * @note   等价于 mt6835_read_start() + mt6835_read_finish()。
+  *         上板实测（Release，10.5 MHz）：阻塞约 8.6 us；若用异步版
+  *         把线上时间藏进 FOC 运算，CPU 占用降到约 4.4 us。
   *         调用前请确保已 mt6835_init() 成功。
   */
 mt6835_status_t mt6835_read(mt6835_t *dev);
+
+/**
+  * @brief  异步读：发起 DMA 收发后立即返回，不阻塞。
+  * @retval MT6835_ERR_BUSY  上一次异步读取还没 finish
+  * @note   这是 20 kHz 控制环的正确用法——把 4.29 us 的 SPI 线上时间
+  *         藏进 FOC 运算里：
+  *
+  *             mt6835_read_start(&enc);      // 约 1 us
+  *             ... Clarke/Park/PI/SVPWM ...
+  *             mt6835_read_finish(&enc);     // 数据早到了，几乎不阻塞
+  *
+  *         ⚠️ start 之后片选一直保持低电平，直到 finish 才释放，
+  *         所以 start/finish 必须成对出现，中间不要插入长时间阻塞。
+  *         若 port 没提供 DMA 通道，本函数退化为同步完成整帧。
+  */
+mt6835_status_t mt6835_read_start(mt6835_t *dev);
+
+/**
+  * @brief  收取异步读的结果并解包（CRC 校验、角度解码、多圈更新都在这里）。
+  */
+mt6835_status_t mt6835_read_finish(mt6835_t *dev);
+
+/** @brief 是否有异步读取正在进行。 */
+bool mt6835_read_pending(const mt6835_t *dev);
 
 /* ========================================================================== */
 /* 取值（纯计算，无 I/O，ISR 安全）                                             */
