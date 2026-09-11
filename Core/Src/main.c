@@ -67,12 +67,18 @@ volatile uint32_t g_mt6835_loops;         /* 轮询次数，用来确认循环�
 volatile uint32_t g_mt6835_status;        /* 传感器状态位（超速/弱磁/欠压） */
 
 /* ---- RAM 示波器：目标板自己采样，主机用 tools/scope_capture.py 经 SWD 抓走 ----
-   通道分配（bring-up 阶段）：
-     ch0 = 原始 21 bit 角度   ch1 = 同步阻塞读耗时 ns
-     ch2 = 异步 start ns      ch3 = 异步 finish ns
-     ch4 = 芯片给的 CRC       ch5 = 轮询计数（斜坡，用来确认采样连续）
-   转动电机轴时 ch0 应该是平滑锯齿，ch1~ch3 应该是三条水平线。 */
+   通道分配（bring-up 阶段，采样率 ≈ 1 kHz）：
+     ch0 = 位置，毫度 [0, 360000)      ← 转动电机轴时应是平滑锯齿
+     ch1 = 速度，rpm×100（已低通）      ← 匀速转动时应是水平线
+     ch2 = 速度，rpm×100（未滤波）      ← 用它看量化噪声有多大，决定低通多重
+     ch3 = 原始 21 bit 计数值
+     ch4 = 芯片给的 CRC
+     ch5 = 同步阻塞读耗时 ns
+   注意：ch0~ch2 都放大成整数存放（scope 通道是 int32）。 */
 scope_t          g_scope;
+volatile int32_t g_mt6835_pos_mdeg;      /* 位置，毫度 */
+volatile int32_t g_mt6835_speed_rpm100;  /* 速度，rpm×100（滤波后） */
+volatile int32_t g_mt6835_speed_raw100;  /* 速度，rpm×100（未滤波） */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -134,6 +140,10 @@ int main(void)
   /* RAM 示波器：采样率就是下面主循环的轮询频率（约 1 kHz）。
      真正跑 FOC 时改成 20000，并在 ADC 注入中断里调 scope_push()。 */
   scope_init(&g_scope, 1000u);
+
+  /* 测速低通：1 kHz 采样下取 20 Hz 截止，α≈0.12，时间常数约 8 ms。
+     跑 20 kHz 时换成 mt6835_set_speed_filter_hz(&g_mt6835, 200.0f, 20000.0f)。 */
+  mt6835_set_speed_filter_hz(&g_mt6835, 20.0f, 1000.0f);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -188,15 +198,21 @@ int main(void)
       }
       g_mt6835_loops++;
 
-      /* 推一组样本进 RAM 示波器（约 25 周期，对控制环无影响） */
+      /* 推一组样本进 RAM 示波器（约 25 周期，对控制环无影响）。
+         位置/速度都放大成整数：毫度、rpm×100 —— scope 通道是 int32，
+         直接塞浮点会丢精度，主机侧用 --div 除回来即可。 */
+      g_mt6835_pos_mdeg     = (int32_t)(mt6835_angle_deg(&g_mt6835) * 1000.0f);
+      g_mt6835_speed_rpm100 = (int32_t)(mt6835_speed_rpm(&g_mt6835) * 100.0f);
+      g_mt6835_speed_raw100 =
+          (int32_t)(mt6835_speed_raw_rad_s(&g_mt6835) * 9.5492965855f * 100.0f);
       {
         int32_t sv[SCOPE_CHANNELS];
-        sv[0] = (int32_t)g_mt6835_raw;
-        sv[1] = (int32_t)g_mt6835_read_ns;
-        sv[2] = (int32_t)g_mt6835_async_start_ns;
-        sv[3] = (int32_t)g_mt6835_async_finish_ns;
+        sv[0] = g_mt6835_pos_mdeg;
+        sv[1] = g_mt6835_speed_rpm100;
+        sv[2] = g_mt6835_speed_raw100;
+        sv[3] = (int32_t)g_mt6835.sample.raw;
         sv[4] = (int32_t)g_mt6835.sample.crc;
-        sv[5] = (int32_t)g_mt6835_loops;
+        sv[5] = (int32_t)g_mt6835_read_ns;
         scope_push(&g_scope, sv);
       }
     }

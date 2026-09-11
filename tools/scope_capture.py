@@ -68,9 +68,29 @@ HEADER_SIZE = HEADER_WORDS * 4
 VERSION = 1
 
 
+# 与 main.c 的 bring-up 通道分配对应（ch0..ch5）。
+# 目标板把浮点放大成整数存进 int32 通道（毫度、rpm×100），
+# 所以这里默认名字和除数一起给出，除非用户用 --names/--div 覆盖。
+DEFAULT_NAMES = ["pos_deg", "speed_rpm", "speed_raw_rpm",
+                 "raw", "crc", "blocking_ns"]
+DEFAULT_DIVS = [1000.0, 100.0, 100.0, 1.0, 1.0, 1.0]
+
+
 def die(msg):
     print("错误: " + msg, file=sys.stderr)
     sys.exit(1)
+
+
+def parse_list(s, count, default, cast=float):
+    """把 "a,b,c" 解析成长度 count 的列表，不足的用 default 补。"""
+    if s:
+        vals = [cast(x.strip()) for x in s.split(",") if x.strip() != ""]
+    else:
+        vals = list(default)
+    while len(vals) < count:
+        vals.append(default[len(vals)] if len(vals) < len(default) else
+                    (1.0 if cast is float else "ch%d" % len(vals)))
+    return vals[:count]
 
 
 # --------------------------------------------------------------------------
@@ -274,14 +294,15 @@ def capture(elf, addr, freeze=False, resume=False, quiet=False):
 # --------------------------------------------------------------------------
 # 输出
 # --------------------------------------------------------------------------
-def save_csv(path, info, samples, names):
+def save_csv(path, info, samples, names, divs):
     fs = max(info["fs"], 1)
     n = len(samples)
     with open(path, "w", encoding="utf-8") as f:
         f.write("t_ms," + ",".join(names) + "\n")
         for i, row in enumerate(samples):
             t = (i + 1 - n) * 1000.0 / fs      # 最新样本在 t=0，便于对齐触发点
-            f.write("%.4f," % t + ",".join(str(v) for v in row) + "\n")
+            vals = [row[c] / divs[c] for c in range(len(row))]
+            f.write("%.4f," % t + ",".join("%.6g" % v for v in vals) + "\n")
     print("已写出 CSV: " + path)
 
 
@@ -304,7 +325,7 @@ def setup_cjk_font():
     return False
 
 
-def plot(info, samples, names, save=None, show=False):
+def plot(info, samples, names, divs, save=None, show=False):
     """绘图。
 
     默认**只存图不弹窗** —— 这是刻意的：matplotlib 的交互后端在没有显示环境
@@ -355,7 +376,7 @@ def plot(info, samples, names, save=None, show=False):
         axes = [axes]
 
     for c in range(ch):
-        y = [row[c] for row in samples]
+        y = [row[c] / divs[c] for row in samples]
         ax = axes[c]
         ax.plot(t, y, linewidth=0.9, color="C%d" % (c % 10))
         ax.set_ylabel(names[c])
@@ -384,7 +405,12 @@ def main():
     ap.add_argument("--elf", default=DEFAULT_ELF, help="ELF 路径")
     ap.add_argument("--symbol", default=SYMBOL, help="scope 实例的符号名")
     ap.add_argument("--names", default=None,
-                    help="通道名，逗号分隔，例如 ia,ib,ic,angle,id,iq")
+                    help="通道名，逗号分隔。默认按 main.c 的 bring-up 布局: "
+                         + ",".join(DEFAULT_NAMES))
+    ap.add_argument("--div", default=None,
+                    help="每通道除数，逗号分隔。目标板把浮点放大成整数存放"
+                         "（如毫度、rpm×100），用它除回真实单位。默认: "
+                         + ",".join("%g" % d for d in DEFAULT_DIVS))
     ap.add_argument("--csv", default=None, help="保存 CSV")
     ap.add_argument("--save", default=None,
                     help="图片输出路径，默认 scope.png")
@@ -409,6 +435,8 @@ def main():
     ocd.start()
     try:
         last = None
+        names = None
+        divs = None
         for k in range(max(args.repeat, 1)):
             if args.repeat > 1:
                 print("\n--- 第 %d/%d 次 ---" % (k + 1, args.repeat))
@@ -418,11 +446,11 @@ def main():
                                     quiet=(args.repeat > 1 and k > 0))
             last = (info, samples)
 
-            names = (args.names.split(",") if args.names
-                     else ["ch%d" % i for i in range(info["channels"])])
-            if len(names) < info["channels"]:
-                names += ["ch%d" % i
-                          for i in range(len(names), info["channels"])]
+            ch = info["channels"]
+            names = parse_list(args.names, ch, DEFAULT_NAMES, cast=str)
+            divs = parse_list(args.div, ch, DEFAULT_DIVS, cast=float)
+            # 除数不能为 0，否则绘图/导出会除零
+            divs = [(d if d != 0 else 1.0) for d in divs]
 
             if args.csv:
                 if args.repeat > 1:
@@ -430,18 +458,13 @@ def main():
                     path = "%s_%d%s" % (root, k, ext)
                 else:
                     path = args.csv
-                save_csv(path, info, samples, names)
+                save_csv(path, info, samples, names, divs)
 
             if args.interval and k < args.repeat - 1:
                 time.sleep(args.interval)
 
         if last:
-            names = (args.names.split(",") if args.names
-                     else ["ch%d" % i for i in range(last[0]["channels"])])
-            if len(names) < last[0]["channels"]:
-                names += ["ch%d" % i
-                          for i in range(len(names), last[0]["channels"])]
-            plot(last[0], last[1], names,
+            plot(last[0], last[1], names, divs,
                  save=args.save, show=args.show)
     finally:
         ocd.stop()

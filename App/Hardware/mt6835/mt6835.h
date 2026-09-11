@@ -189,6 +189,16 @@ typedef struct {
       * @param  timeout_us 超时（微秒）
       */
     mt6835_status_t (*transfer_wait)(void *ctx, uint32_t timeout_us);
+
+    /* ---------------- 可选：时间源（用于测速） ---------------- */
+
+    /**
+      * @brief  单调递增的微秒时戳。
+      * @note   为 NULL 时驱动不做速度估计，mt6835_speed_*() 恒返回 0。
+      *         必须**单调**（允许无符号回绕，差值用无符号减法自动处理），
+      *         否则测速会出负脉冲。
+      */
+    uint32_t (*timestamp_us)(void *ctx);
 } mt6835_port_t;
 
 /** @brief 一次有效采样。 */
@@ -221,6 +231,12 @@ typedef struct {
     /* ---- 异步读取的内部状态（调用方不用碰） ---- */
     uint8_t         async_rx[MT6835_FRAME_BYTES]; /**< DMA 目标缓冲，start~finish 之间必须存活 */
     bool            async_pending;   /**< 异步传输已发起、尚未收尾 */
+
+    /* ---- 测速状态（由驱动维护） ---- */
+    uint32_t        speed_last_ts_us; /**< 上一次采样的时戳 */
+    float           speed_rad_s;      /**< 一阶低通后的机械角速度 (rad/s) */
+    float           speed_raw_rad_s;  /**< 未滤波的差分原值 (rad/s)，用来看量化噪声 */
+    float           speed_alpha;      /**< 低通系数 (0,1]，越大越跟手、噪声越大 */
 } mt6835_t;
 
 /* ========================================================================== */
@@ -295,6 +311,49 @@ mt6835_status_t mt6835_read_finish(mt6835_t *dev);
 
 /** @brief 是否有异步读取正在进行。 */
 bool mt6835_read_pending(const mt6835_t *dev);
+
+/* ========================================================================== */
+/* 测速（纯计算，无 I/O，ISR 安全）                                             */
+/* ========================================================================== */
+
+/**
+  * @brief  机械角速度，rad/s。**已一阶低通**。
+  * @note   需要 port 提供 timestamp_us；没有就恒返回 0。
+  *
+  *         测速原理是最朴素的"位置差分 / 时间差分"：
+  *             ω = Δθ / Δt
+  *         用 DWT 而不是 SysTick 计时，因为 20 kHz 下 Δt 只有 50 us，
+  *         SysTick 的 1 ms 分辨率完全不够。
+  *
+  *         精度估算（20 kHz 采样、10.5 MHz SPI）：
+  *             角度量化 360/2^21 = 1.7e-4 度
+  *             一次采样内 1 个计数对应 2.99e-6 / 50e-6 = 0.06 rad/s
+  *         也就是说**低速时量化噪声约 0.06 rad/s，经低通后进一步下降**。
+  *         要更高的低速精度需要 M/T 法或观测器，那是 FOC 层的事。
+  */
+float mt6835_speed_rad_s(const mt6835_t *dev);
+
+/** @brief 机械转速，rpm。已低通。 */
+float mt6835_speed_rpm(const mt6835_t *dev);
+
+/**
+  * @brief  未滤波的差分速度，rad/s。
+  * @note   波形会很毛糙 —— 这正是它的用途：观察量化噪声有多大，
+  *         据此决定低通要多重。上板看波形时建议把它和滤波后的并排画。
+  */
+float mt6835_speed_raw_rad_s(const mt6835_t *dev);
+
+/**
+  * @brief  按截止频率设置低通（一阶 IIR）。
+  * @param  cutoff_hz 截止频率
+  * @param  sample_hz 采样率（即控制频率）
+  * @note   α = 1 - exp(-2π·fc/fs)。fc 越低越平滑但相位滞后越大，
+  *         做速度环时这个滞后会吃掉相位裕度，别设得太低。
+  */
+void mt6835_set_speed_filter_hz(mt6835_t *dev, float cutoff_hz, float sample_hz);
+
+/** @brief 直接设置低通系数 α ∈ (0,1]。 */
+void mt6835_set_speed_filter_alpha(mt6835_t *dev, float alpha);
 
 /* ========================================================================== */
 /* 取值（纯计算，无 I/O，ISR 安全）                                             */

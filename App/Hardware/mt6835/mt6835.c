@@ -10,6 +10,8 @@
 
 #include "mt6835.h"
 
+#include <math.h>   /* expf：只在配置低通系数时用一次，不在热路径 */
+
 /*
  * 热路径上的小函数一律强制内联。
  * 在 -Os（Release）下 GCC 多数会自己内联，但 Debug 的 -O0 不会——
@@ -113,7 +115,9 @@ static mt6835_status_t mt6835_frame(mt6835_t *dev,
     return st;
 }
 
-MT6835_ALWAYS_INLINE void mt6835_track_turns(mt6835_t *dev, uint32_t raw)
+/* 多圈展开。返回本次的计数增量（已应用方向），供测速复用 ——
+   速度必须基于**展开后**的增量，否则过零那一拍会算出巨大的假速度。 */
+MT6835_ALWAYS_INLINE int32_t mt6835_track_turns(mt6835_t *dev, uint32_t raw)
 {
     int32_t delta;
 
@@ -121,7 +125,7 @@ MT6835_ALWAYS_INLINE void mt6835_track_turns(mt6835_t *dev, uint32_t raw)
         dev->have_sample  = true;
         dev->prev_raw     = raw;
         dev->total_counts = 0;
-        return;
+        return 0;
     }
 
     delta = (int32_t)raw - (int32_t)dev->prev_raw;
@@ -141,6 +145,43 @@ MT6835_ALWAYS_INLINE void mt6835_track_turns(mt6835_t *dev, uint32_t raw)
 
     dev->total_counts += (int64_t)delta;
     dev->prev_raw      = raw;
+
+    return delta;
+}
+
+/* 位置差分测速：ω = Δθ / Δt，再走一阶 IIR 低通。
+   时间戳用无符号减法算 Δt，DWT 回绕会被自动处理。 */
+MT6835_ALWAYS_INLINE void mt6835_update_speed(mt6835_t *dev,
+                                              int32_t delta_counts,
+                                              bool    first_sample)
+{
+    uint32_t now;
+    uint32_t dt;
+    float    raw;
+
+    if (dev->port.timestamp_us == NULL) {
+        return;   /* 没接时间源就不测速 */
+    }
+
+    now = dev->port.timestamp_us(dev->port.ctx);
+
+    if (first_sample) {
+        /* 第一个样本没有参考点，只登记时戳 */
+        dev->speed_last_ts_us = now;
+        return;
+    }
+
+    dt = now - dev->speed_last_ts_us;
+    dev->speed_last_ts_us = now;
+
+    if (dt == 0u) {
+        return;   /* 时戳没走（分辨率不够），本拍不更新，保留上次值 */
+    }
+
+    raw = ((float)delta_counts * MT6835_RAD_PER_COUNT) / ((float)dt * 1.0e-6f);
+
+    dev->speed_raw_rad_s = raw;
+    dev->speed_rad_s += dev->speed_alpha * (raw - dev->speed_rad_s);
 }
 
 /* 慢路径通用 24 bit 帧：命令 2 字节 + 数据 1 字节 */
@@ -225,6 +266,14 @@ mt6835_status_t mt6835_init(mt6835_t *dev, const mt6835_port_t *port)
     dev->comm_errors  = 0u;
     dev->crc_errors   = 0u;
     dev->async_pending = false;
+
+    /* 测速状态。默认 α=0.05：20 kHz 下时间常数约 1 ms，
+       对 0.06 rad/s 量级的量化噪声能把峰峰值压到十分之一左右，
+       而相位滞后 ~1 ms 对速度环仍可接受。可用 mt6835_set_speed_filter_hz() 调。 */
+    dev->speed_last_ts_us = 0u;
+    dev->speed_rad_s      = 0.0f;
+    dev->speed_raw_rad_s  = 0.0f;
+    dev->speed_alpha      = 0.05f;
 
     /* 上电后芯片需要时间完成内部初始化，此期间 SPI 不应答。
        不等就会读到一串失败，很容易被误判成"接线错了"。 */
@@ -320,6 +369,8 @@ static mt6835_status_t mt6835_decode_frame(mt6835_t *dev, const uint8_t *rx)
                           | ((uint32_t)rx[3] << 5)
                           | ((uint32_t)rx[4] >> 3);
     const uint8_t  status = (uint8_t)(rx[4] & 0x07u);
+    const bool     first  = !dev->have_sample;
+    int32_t        delta;
 
 #if (MT6835_ENABLE_CRC != 0)
     if (dev->check_crc && (mt6835_crc8(raw, status) != rx[5])) {
@@ -336,7 +387,9 @@ static mt6835_status_t mt6835_decode_frame(mt6835_t *dev, const uint8_t *rx)
     dev->sample.status = status;
     dev->sample.crc    = rx[5];
 
-    mt6835_track_turns(dev, raw);
+    /* 测速必须放在多圈展开之后：直接用原始值的差，过零那一拍会算出巨大假速度 */
+    delta = mt6835_track_turns(dev, raw);
+    mt6835_update_speed(dev, delta, first);
 
     return MT6835_OK;
 }
@@ -407,6 +460,65 @@ mt6835_status_t mt6835_read_finish(mt6835_t *dev)
 bool mt6835_read_pending(const mt6835_t *dev)
 {
     return (dev == NULL) ? false : dev->async_pending;
+}
+
+/* ========================================================================== */
+/* 测速                                                                        */
+/* ========================================================================== */
+
+float mt6835_speed_rad_s(const mt6835_t *dev)
+{
+    return (dev == NULL) ? 0.0f : dev->speed_rad_s;
+}
+
+float mt6835_speed_rpm(const mt6835_t *dev)
+{
+    if (dev == NULL) {
+        return 0.0f;
+    }
+    /* rad/s -> rpm: * 60 / (2π) */
+    return dev->speed_rad_s * 9.549296585513721f;
+}
+
+float mt6835_speed_raw_rad_s(const mt6835_t *dev)
+{
+    return (dev == NULL) ? 0.0f : dev->speed_raw_rad_s;
+}
+
+void mt6835_set_speed_filter_hz(mt6835_t *dev, float cutoff_hz, float sample_hz)
+{
+    float alpha;
+
+    if ((dev == NULL) || (cutoff_hz <= 0.0f) || (sample_hz <= 0.0f)) {
+        return;
+    }
+
+    /* 一阶 IIR：α = 1 - exp(-2π·fc/fs) */
+    alpha = 1.0f - expf(-6.283185307179586f * cutoff_hz / sample_hz);
+
+    /* 夹到合法区间：α<=0 会永远不更新，α>1 会振荡 */
+    if (alpha < 0.0001f) {
+        alpha = 0.0001f;
+    }
+    if (alpha > 1.0f) {
+        alpha = 1.0f;
+    }
+
+    dev->speed_alpha = alpha;
+}
+
+void mt6835_set_speed_filter_alpha(mt6835_t *dev, float alpha)
+{
+    if (dev == NULL) {
+        return;
+    }
+    if (alpha < 0.0001f) {
+        alpha = 0.0001f;
+    }
+    if (alpha > 1.0f) {
+        alpha = 1.0f;
+    }
+    dev->speed_alpha = alpha;
 }
 
 mt6835_status_t mt6835_read(mt6835_t *dev)

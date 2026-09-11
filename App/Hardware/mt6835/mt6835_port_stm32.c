@@ -133,6 +133,14 @@ static void port_delay_ms(void *ctx, uint32_t ms)
     bsp_time_delay_ms(ms);
 }
 
+/* 测速用的时间源。DWT 周期计数换算成微秒，单调递增，
+   约 71 分钟无符号回绕一次 —— 驱动侧的 Δt 用无符号减法，会自动处理。 */
+static uint32_t port_timestamp_us(void *ctx)
+{
+    (void)ctx;
+    return bsp_time_us();
+}
+
 /* -------------------------------------------------------------------------- */
 /* 公开接口                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -166,6 +174,7 @@ bool mt6835_port_stm32_bind(mt6835_t          *dev,
     port.transfer  = port_transfer;
     port.delay_us  = port_delay_us;
     port.delay_ms  = port_delay_ms;
+    port.timestamp_us = port_timestamp_us;   /* 测速时间源（DWT 微秒） */
 
     /* DMA 通道：本工程 SPI3 -> DMA1 Stream0(RX) / Stream5(TX)。
        配置全部在 bsp_spi 里用寄存器完成，不依赖 CubeMX 的 DMA 设置，
