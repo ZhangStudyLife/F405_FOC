@@ -33,6 +33,11 @@ NM = r"D:\DevEnv\GNU-tools-for-STM32\bin\arm-none-eabi-nm.exe"
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_ELF = os.path.join(PROJECT_ROOT, "build", "Release", "405_FOC.elf")
 
+# 示波器实例是 App/Protocols/scope/scope_encoder.c 里的文件作用域静态变量，
+# 属于那个模块的实现细节 —— 所以是 s_ 前缀而不是 g_。
+# 它是静态符号，nm 一样能列出来（小写 b/B）。
+DEFAULT_SYMBOL = "s_scope"
+
 SCOPE_MAGIC = 0x53434F50          # "SCOP"
 HEADER_WORDS = 8
 HEADER_SIZE = HEADER_WORDS * 4
@@ -137,7 +142,7 @@ class OcdTelnet:
 class ScopeReader:
     """管好 OpenOCD 进程 + telnet 连接 + 临时文件的生命周期。"""
 
-    def __init__(self, elf=DEFAULT_ELF, symbol="g_scope",
+    def __init__(self, elf=DEFAULT_ELF, symbol=DEFAULT_SYMBOL,
                  port=DEFAULT_TELNET_PORT):
         self.elf = elf
         self.symbol = symbol
@@ -265,7 +270,7 @@ class ScopeReader:
         }
 
     def _dump_words(self, word_offset, word_count):
-        """从 g_scope.data[word_offset] 起读 word_count 个 int32。"""
+        """从实例数据区第 word_offset 个 int32 起读 word_count 个。"""
         base = self.addr + HEADER_SIZE + word_offset * 4
         if os.path.exists(self._dump_path):
             os.unlink(self._dump_path)

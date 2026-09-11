@@ -28,7 +28,8 @@
 #include "bsp_time.h"
 #include "mt6835.h"
 #include "mt6835_port_stm32.h"
-#include "scope.h"
+/* 想看位置/速度波形时取消下面这行的注释（见 USER CODE BEGIN 2 / 3 的说明） */
+/* #include "scope_encoder.h" */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -65,20 +66,6 @@ volatile uint32_t g_mt6835_async_start_ns;  /* read_start（发起 DMA）的 CPU
 volatile uint32_t g_mt6835_async_finish_ns; /* 中间插了 6us 模拟运算后 finish 的开销 */
 volatile uint32_t g_mt6835_loops;         /* 轮询次数，用来确认循环真的在跑 */
 volatile uint32_t g_mt6835_status;        /* 传感器状态位（超速/弱磁/欠压） */
-
-/* ---- RAM 示波器：目标板自己采样，主机用 tools/scope_capture.py 经 SWD 抓走 ----
-   通道分配（bring-up 阶段，采样率 ≈ 1 kHz）：
-     ch0 = 位置，毫度 [0, 360000)      ← 转动电机轴时应是平滑锯齿
-     ch1 = 速度，rpm×100（已低通）      ← 匀速转动时应是水平线
-     ch2 = 速度，rpm×100（未滤波）      ← 用它看量化噪声有多大，决定低通多重
-     ch3 = 原始 21 bit 计数值
-     ch4 = 芯片给的 CRC
-     ch5 = 同步阻塞读耗时 ns
-   注意：ch0~ch2 都放大成整数存放（scope 通道是 int32）。 */
-scope_t          g_scope;
-volatile int32_t g_mt6835_pos_mdeg;      /* 位置，毫度 */
-volatile int32_t g_mt6835_speed_rpm100;  /* 速度，rpm×100（滤波后） */
-volatile int32_t g_mt6835_speed_raw100;  /* 速度，rpm×100（未滤波） */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -137,9 +124,14 @@ int main(void)
   }
 #endif
 
-  /* RAM 示波器：采样率就是下面主循环的轮询频率（约 1 kHz）。
-     真正跑 FOC 时改成 20000，并在 ADC 注入中断里调 scope_push()。 */
-  scope_init(&g_scope, 1000u);
+  /* ---- 位置/速度波形记录（可选）------------------------------------------
+     实现在 App/Protocols/scope/scope_encoder.c，通道布局、放大系数、
+     示波器实例全在里面。这里只要「初始化一次 + 每拍录一次」两步。
+     采样率 = 下面主循环的频率；真正跑 FOC 时改成 20000，并把 update 挪到
+     ADC 注入中断里。想要波形就把下面两行（这里和主循环里各一行）
+     连同文件顶部的 #include "scope_encoder.h" 一起取消注释即可。 */
+  // scope_encoder_init(&g_mt6835, 1000u);
+  /* ----------------------------------------------------------------------- */
 
   /* 测速低通：1 kHz 采样下取 20 Hz 截止，α≈0.12，时间常数约 8 ms。
      跑 20 kHz 时换成 mt6835_set_speed_filter_hz(&g_mt6835, 200.0f, 20000.0f)。 */
@@ -198,23 +190,10 @@ int main(void)
       }
       g_mt6835_loops++;
 
-      /* 推一组样本进 RAM 示波器（约 25 周期，对控制环无影响）。
-         位置/速度都放大成整数：毫度、rpm×100 —— scope 通道是 int32，
-         直接塞浮点会丢精度，主机侧用 --div 除回来即可。 */
-      g_mt6835_pos_mdeg     = (int32_t)(mt6835_angle_deg(&g_mt6835) * 1000.0f);
-      g_mt6835_speed_rpm100 = (int32_t)(mt6835_speed_rpm(&g_mt6835) * 100.0f);
-      g_mt6835_speed_raw100 =
-          (int32_t)(mt6835_speed_raw_rad_s(&g_mt6835) * 9.5492965855f * 100.0f);
-      {
-        int32_t sv[SCOPE_CHANNELS];
-        sv[0] = g_mt6835_pos_mdeg;
-        sv[1] = g_mt6835_speed_rpm100;
-        sv[2] = g_mt6835_speed_raw100;
-        sv[3] = (int32_t)g_mt6835.sample.raw;
-        sv[4] = (int32_t)g_mt6835.sample.crc;
-        sv[5] = (int32_t)g_mt6835_read_ns;
-        scope_push(&g_scope, sv);
-      }
+      /* 录一个位置/速度样本进波形缓冲（可从中断调用，约 25 周期）。
+         想要波形就取消下面这行的注释，并把 USER CODE BEGIN 2 里的
+         scope_encoder_init() 和顶部 include 一起放开。 */
+      // scope_encoder_update(&g_mt6835);
     }
     HAL_Delay(1);
 #endif

@@ -43,7 +43,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from scope_lib import (ScopeReader, setup_cjk_font, parse_list,
-                       DEFAULT_ELF, DEFAULT_NAMES, DEFAULT_DIVS)
+                       DEFAULT_ELF, DEFAULT_NAMES, DEFAULT_DIVS, DEFAULT_SYMBOL)
 
 WINDOW_CHOICES = ["256", "512", "1024"]
 DEFAULT_WINDOW = "1024"
@@ -62,7 +62,7 @@ DEFAULT_YRANGE = {
 
 
 class ScopeApp:
-    def __init__(self, root, elf=DEFAULT_ELF, symbol="g_scope",
+    def __init__(self, root, elf=DEFAULT_ELF, symbol=DEFAULT_SYMBOL,
                  names=None, divs=None, window=DEFAULT_WINDOW,
                  visible=None, yrange=None):
         self.root = root
@@ -268,8 +268,8 @@ class ScopeApp:
         self.thread.start()
         self.btn_run.config(text="■ 停止")
         self.btn_freeze.config(state=tk.NORMAL)
-        self.status.set("已连接 g_scope @ 0x%08X，采集中…   （空格键 = 冻结）"
-                        % self.reader.addr)
+        self.status.set("已连接 %s @ 0x%08X，采集中…   （空格键 = 冻结）"
+                        % (DEFAULT_SYMBOL, self.reader.addr))
 
     def _stop(self):
         self.stop_flag.set()

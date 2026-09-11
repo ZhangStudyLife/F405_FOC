@@ -17,27 +17,34 @@
   * ---------------------------------------------------------------------------
   * 用法
   * ---------------------------------------------------------------------------
-  *   // 1) 定义实例（放全局，主机靠符号名找它）
-  *   scope_t g_scope;
+  * 本模块只认"往环形缓冲塞几个 int32"，不知道任何业务含义。
   *
-  *   // 2) 初始化一次
-  *   scope_init(&g_scope, 20000u);        // 20 kHz
+  * 用编码器的位置/速度时，**不要在业务代码里直接用它** ——
+  * 通道布局、放大系数、实例定义都已经收在 App/Protocols/scope/scope_encoder.h
+  * 里了，那边只需要两步：
   *
-  *   // 3) 在控制中断里推样本（约 25 周期，可忽略）
-  *   int32_t v[SCOPE_CHANNELS] = { ia, ib, angle, id, iq, duty };
-  *   scope_push(&g_scope, v);
+  *     scope_encoder_init(&dev, 20000u);    // 初始化一次
+  *     scope_encoder_update(&dev);          // 每拍录一次（可从中断调用）
   *
-  *   // 4) 出故障时冻结，保留触发前的历史
-  *   if (fault) scope_freeze(&g_scope);
+  * 想在别处录自己的信号（例如 FOC 的 ia/ib/iq），再直接用它：
   *
-  * 然后跑 `python tools/scope_capture.py` 就能看到波形。
+  *     static scope_t s_my_scope;                       // 本文件私有即可
+  *     scope_init(&s_my_scope, 20000u);
+  *     int32_t v[SCOPE_CHANNELS] = { ia, ib, angle, id, iq, duty };
+  *     scope_push(&s_my_scope, v);
+  *     if (fault) scope_freeze(&s_my_scope);            // 预触发捕获
+  *
+  * 然后跑 `python tools/scope_gui.py` 就能看到波形
+  * （符号名不是默认的 s_scope 时用 --symbol 指定）。
   *
   * ---------------------------------------------------------------------------
-  * 内存
+  * 内存与开销
   * ---------------------------------------------------------------------------
   * SCOPE_DEPTH * SCOPE_CHANNELS * 4 字节 + 32 字节头部。
   * 默认 1024 * 6 * 4 = 24 KB（F405 有 128 KB，当前固件只用了 2 KB）。
-  * 不要的话把 SCOPE_ENABLE 置 0，或在 CMake 里改小这两个宏。
+  *
+  * **没人调用时整个模块会被 --gc-sections 回收**，Flash 和 RAM 一分不占 ——
+  * 所以不需要编译期开关，用不用由"有没有人调"决定。
   ******************************************************************************
   */
 

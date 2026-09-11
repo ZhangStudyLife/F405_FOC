@@ -70,7 +70,11 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/Hardware/mt6835/mt6835_port_stm32.c
 
     # ---- App/Protocols/scope：RAM 示波器（主机经 SWD 抓取）----
+    # scope_encoder.c 是"编码器 -> 示波器"的绑定层，通道布局与放大系数都在里面。
+    # main.c 里若没有调用它，--gc-sections 会把这两个文件整个丢掉，
+    # Flash 和 RAM 一分不占。
     App/Protocols/scope/scope.c
+    App/Protocols/scope/scope_encoder.c
 )
 
 # Add include paths

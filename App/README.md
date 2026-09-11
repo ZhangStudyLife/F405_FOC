@@ -320,18 +320,49 @@ SWD 单次读变量要几毫秒，顶多采到几百 Hz，而 FOC 是 20 kHz —
 
 命令行抓一帧用 `python tools/scope_capture.py`。
 
-```python
-# 固件里（已在 main.c 的 bring-up 段落接好）
-scope_t g_scope;                          # 全局，主机靠符号名找它
-scope_init(&g_scope, 20000u);             # 20 kHz
+### 分层：业务代码不该碰示波器细节
 
-# 控制中断里
-int32_t v[SCOPE_CHANNELS] = { ia, ib, angle, id, iq, duty };
-scope_push(&g_scope, v);
+`App/Protocols/scope/` 里有两层，别搞混：
 
-# 出故障时冻结，保留触发前的历史（预触发捕获）
-if (fault) scope_freeze(&g_scope);
+| 文件 | 职责 |
+|---|---|
+| `scope.h/.c` | 通用 RAM 环形缓冲。只认"往缓冲塞几个 int32"，不知道任何业务含义 |
+| `scope_encoder.h/.c` | **编码器绑定层**。通道布局、放大系数、实例定义全在这里 |
+
+所以 `main.c` 里**看不到 `scope_t`、通道数组、放大系数**，只有待启用的两行：
+
+```c
+// scope_encoder_init(&g_mt6835, 1000u);   /* USER CODE BEGIN 2 */
+// scope_encoder_update(&g_mt6835);        /* USER CODE BEGIN 3 */
 ```
+
+配套的还有文件顶部 `/* #include "scope_encoder.h" */` 一行。
+把这三处的注释放开就有波形，注释回去就彻底没有——**没有任何编译期开关需要维护**。
+
+编码器布局（`scope_encoder.h` 里有完整文档）：
+
+| 通道 | 含义 | 除数 |
+|---|---|---|
+| ch0 | 位置 毫度 | 1000 → 度 |
+| ch1 | 速度 rpm×100（已低通） | 100 → rpm |
+| ch2 | 速度 rpm×100（未滤波） | 100 → rpm |
+| ch3 | 原始 21 bit 计数 | 1 |
+| ch4 | 芯片 CRC | 1 |
+| ch5 | 传感器状态位 | 1 |
+
+想在别处录自己的信号（例如 FOC 的 ia/ib/iq），直接用下层即可：
+
+```c
+static scope_t s_my_scope;                /* 文件私有，主机用 --symbol 找 */
+scope_init(&s_my_scope, 20000u);          /* 初始化一次 */
+int32_t v[SCOPE_CHANNELS] = { ia, ib, iq, id, duty, vbus };
+scope_push(&s_my_scope, v);               /* 每拍一次，可从中断调用 */
+if (fault) scope_freeze(&s_my_scope);     /* 预触发捕获 */
+```
+
+> **不用时零开销**：没人调用时 `--gc-sections` 会把整个模块回收，
+> Flash 和 RAM 一分不占（实测 RAM 2480 B / Flash 11908 B，与没加模块时一致），
+> 连 `s_scope` 符号都不存在。
 
 ### 刷新率：SWD 带宽是硬上限
 

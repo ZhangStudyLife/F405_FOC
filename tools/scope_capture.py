@@ -116,7 +116,7 @@ def main():
     ap = argparse.ArgumentParser(
         description="通过 SWD 抓取目标板 RAM 示波器缓冲（日常看波形建议用 scope_gui.py）")
     ap.add_argument("--elf", default=DEFAULT_ELF, help="ELF 路径")
-    ap.add_argument("--symbol", default="g_scope", help="scope 实例的符号名")
+    ap.add_argument("--symbol", default=DEFAULT_SYMBOL, help="scope 实例的符号名")
     ap.add_argument("--names", default=None,
                     help="通道名，逗号分隔。默认: " + ",".join(DEFAULT_NAMES))
     ap.add_argument("--div", default=None,

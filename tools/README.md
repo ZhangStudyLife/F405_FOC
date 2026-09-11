@@ -119,7 +119,7 @@ python tools/scope_capture.py --window 256          # 只取最近 256 样本（
 | 参数 | 说明 |
 |---|---|
 | `--elf` | ELF 路径，默认 `build/Release/405_FOC.elf` |
-| `--symbol` | scope 实例符号名，默认 `g_scope` |
+| `--symbol` | 示波器实例的符号名，默认 `s_scope`（`scope_encoder.c` 里的静态实例）。录自己的信号时用这个指过去 |
 | `--names` | 通道名，逗号分隔。默认按 `main.c` 的 bring-up 布局 |
 | `--div` | 每通道除数，把放大成整数的通道除回真实单位 |
 | `--csv` | 导出 CSV（`--repeat` 时自动加序号后缀） |
@@ -131,7 +131,9 @@ python tools/scope_capture.py --window 256          # 只取最近 256 样本（
 
 ### 前置条件
 
-1. 固件里定义了全局 `scope_t g_scope;` 并调过 `scope_init()`
+1. 固件里有示波器实例：用编码器波形的话，把 `main.c` 里三处
+   `scope_encoder.h` / `scope_encoder_init` / `scope_encoder_update`
+   的注释放开即可（详见 `App/README.md` 第 8 节）
 2. 已编译 Release：`foc.sh build Release`（脚本要读 ELF 的符号表拿地址）
 3. ST-Link 已连接
 
