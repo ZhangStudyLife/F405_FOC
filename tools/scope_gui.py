@@ -3,22 +3,29 @@
 """
 scope_gui.py —— 编码器位置/速度实时波形上位机（不需要串口，走 ST-Link/SWD）。
 
-    python tools/scope_gui.py
+    python tools/scope_gui.py          （或双击 run_scope_gui.bat）
 
 界面里能做什么
 --------------
-  * 实时滚动显示 6 路信号（默认：位置 / 速度 / 未滤波速度 / 原始计数 / CRC / 读耗时）
-  * 窗口长度可调：样本越少刷新越快（刷新率受 SWD 带宽限制，见下）
-  * 冻结：让目标板停下记录，保留**触发前**的波形（预触发捕获）
-  * 自动缩放 / 通道开关
-  * 存图（PNG）与导出（CSV）
+  * 实时显示位置与速度（默认只开这两路，其余通道可勾选）
+  * **Y 轴固定**：默认位置 0~360 度、速度 -200~200 rpm，可在界面上改
+  * 窗口长度可调：样本越少刷新越快
+  * **冻结（空格键）**：让目标板停下记录，保留触发前的波形
+  * 存图（PNG）/ 导出（CSV）
 
-刷新率说明
-----------
-实测 dump 24608 字节（6 通道 x 1024 样本）约 220 ms，即约 4.5 Hz。
-这是 SWD 的物理带宽，不是脚本慢。把"窗口"调小可以直接提高刷新率：
-256 样本约 55 ms（约 18 Hz），1024 样本约 220 ms（约 4.5 Hz）。
-想同时要"看得快"和"存得多"，就平时用 256 窗口观察，需要细看时切到 1024。
+关于 Y 轴为什么要固定
+--------------------
+自动缩放会让纵轴范围每帧重算 —— 平线时范围塌缩成一条缝、有毛刺时又猛跳，
+看上去像波形在上下弹，根本没法观察趋势。所以默认**关闭自动缩放**并使用固定范围。
+
+关于手转电机时"存下来是平的"
+------------------------------
+原来的默认窗口只有 256 样本 @1 kHz = 0.256 秒，手转一圈装不下；
+而且不冻结就导出，等你停下转动再点导出，缓冲早滚过去了。
+现在：
+  * 默认窗口改成 1024（1.024 秒，够装下手转的一圈）
+  * 点导出/存图时**自动先冻结**，保证存到的就是你眼前这一帧
+  * 空格键随时冻结 —— 一边转一边按，抓最方便
 """
 
 import os
@@ -38,16 +45,29 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from scope_lib import (ScopeReader, setup_cjk_font, parse_list,
                        DEFAULT_ELF, DEFAULT_NAMES, DEFAULT_DIVS)
 
-WINDOW_CHOICES = ["128", "256", "512", "1024"]
-DEFAULT_WINDOW = "256"
+WINDOW_CHOICES = ["256", "512", "1024"]
+DEFAULT_WINDOW = "1024"
+
+# 默认只显示这两路：位置、速度
+DEFAULT_VISIBLE = [0, 1]
+
+# 固定 Y 轴默认范围（按物理量纲定，不是从数据里猜的）：
+#   位置：编码器输出就是 [0,360) 度，范围天然固定
+#   速度：手转电机一般在 ±150 rpm 以内，取 ±200 留余量；
+#         跑 FOC 高速时需要自己往上调，界面上可以改
+DEFAULT_YRANGE = {
+    0: (0.0, 360.0),      # 位置 (度)
+    1: (-200.0, 200.0),   # 速度 (rpm)
+}
 
 
 class ScopeApp:
     def __init__(self, root, elf=DEFAULT_ELF, symbol="g_scope",
-                 names=None, divs=None, window=DEFAULT_WINDOW):
+                 names=None, divs=None, window=DEFAULT_WINDOW,
+                 visible=None, yrange=None):
         self.root = root
         self.root.title("MT6835 位置/速度波形 —— ST-Link/SWD")
-        self.root.geometry("1180x820")
+        self.root.geometry("1180x760")
 
         self.reader = None
         self.thread = None
@@ -58,18 +78,27 @@ class ScopeApp:
         self.divs = list(divs) if divs else list(DEFAULT_DIVS)
         self.window = int(window)
         self.ch_count = len(self.names)
-        self.show = [True] * self.ch_count
-        self.autoscale = tk.BooleanVar(value=True)
+        self.show = [False] * self.ch_count
+        for i in (visible if visible is not None else DEFAULT_VISIBLE):
+            if 0 <= i < self.ch_count:
+                self.show[i] = True
+        self.yrange = dict(yrange if yrange is not None else DEFAULT_YRANGE)
+        self.autoscale = tk.BooleanVar(value=False)   # 默认固定 Y 轴
         self.frozen_now = False
         self.last_info = None
         self.last_samples = None
         self.frame_times = []
+
+        self.axes = [None] * self.ch_count
+        self.lines = [None] * self.ch_count
+        self.yentries = {}
 
         cjk = setup_cjk_font()
         self.L_TIME = "时间 (ms)" if cjk else "time (ms)"
         self.L_HINT = "0 = 最新样本" if cjk else "0 = newest"
 
         self._build_ui()
+        self._rebuild_axes()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(30, self._poll)
 
@@ -77,15 +106,17 @@ class ScopeApp:
     # 界面
     # ------------------------------------------------------------------
     def _build_ui(self):
-        bar = ttk.Frame(self.root, padding=(8, 6))
+        # 第一行：运行控制
+        bar = ttk.Frame(self.root, padding=(8, 6, 8, 0))
         bar.pack(side=tk.TOP, fill=tk.X)
 
-        self.btn_run = ttk.Button(bar, text="▶ 开始", width=10,
+        self.btn_run = ttk.Button(bar, text="▶ 开始", width=10, takefocus=0,
                                   command=self._toggle_run)
         self.btn_run.pack(side=tk.LEFT)
 
-        self.btn_freeze = ttk.Button(bar, text="❄ 冻结", width=10,
-                                     command=self._toggle_freeze, state=tk.DISABLED)
+        self.btn_freeze = ttk.Button(bar, text="❄ 冻结 (空格)", width=14,
+                                     takefocus=0, command=self._toggle_freeze,
+                                     state=tk.DISABLED)
         self.btn_freeze.pack(side=tk.LEFT, padx=(6, 0))
 
         ttk.Label(bar, text="  窗口(样本):").pack(side=tk.LEFT)
@@ -95,50 +126,123 @@ class ScopeApp:
         self.cmb_window.pack(side=tk.LEFT)
         self.cmb_window.bind("<<ComboboxSelected>>", self._on_window_change)
 
-        ttk.Checkbutton(bar, text="自动缩放", variable=self.autoscale
-                        ).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Checkbutton(bar, text="自动缩放 Y", variable=self.autoscale,
+                        command=self._redraw).pack(side=tk.LEFT, padx=(12, 0))
 
-        ttk.Button(bar, text="保存图片", command=self._save_png
+        ttk.Button(bar, text="导出 CSV", takefocus=0, command=self._save_csv
                    ).pack(side=tk.RIGHT)
-        ttk.Button(bar, text="导出 CSV", command=self._save_csv
+        ttk.Button(bar, text="保存图片", takefocus=0, command=self._save_png
                    ).pack(side=tk.RIGHT, padx=(0, 6))
 
         # 第二行：通道开关
-        bar2 = ttk.Frame(self.root, padding=(8, 0, 8, 6))
+        bar2 = ttk.Frame(self.root, padding=(8, 4, 8, 0))
         bar2.pack(side=tk.TOP, fill=tk.X)
-        ttk.Label(bar2, text="通道:").pack(side=tk.LEFT)
+        ttk.Label(bar2, text="显示通道:").pack(side=tk.LEFT)
         self.ch_vars = []
         for i in range(self.ch_count):
-            v = tk.BooleanVar(value=True)
+            v = tk.BooleanVar(value=self.show[i])
             self.ch_vars.append(v)
             ttk.Checkbutton(bar2, text=self.names[i], variable=v,
                             command=self._on_channel_toggle
-                            ).pack(side=tk.LEFT, padx=(4, 0))
+                            ).pack(side=tk.LEFT, padx=(6, 0))
+
+        # 第三行：Y 轴固定范围
+        bar3 = ttk.Frame(self.root, padding=(8, 4, 8, 6))
+        bar3.pack(side=tk.TOP, fill=tk.X)
+        ttk.Label(bar3, text="Y 轴范围:").pack(side=tk.LEFT)
+        for idx in sorted(self.yrange.keys()):
+            if idx >= self.ch_count:
+                continue
+            ttk.Label(bar3, text="  %s" % self.names[idx]).pack(side=tk.LEFT)
+            lo = tk.StringVar(value="%g" % self.yrange[idx][0])
+            hi = tk.StringVar(value="%g" % self.yrange[idx][1])
+            e_lo = ttk.Entry(bar3, textvariable=lo, width=8)
+            e_hi = ttk.Entry(bar3, textvariable=hi, width=8)
+            e_lo.pack(side=tk.LEFT, padx=(2, 0))
+            ttk.Label(bar3, text="~").pack(side=tk.LEFT)
+            e_hi.pack(side=tk.LEFT)
+            for e in (e_lo, e_hi):
+                e.bind("<Return>", self._apply_yrange)
+                e.bind("<FocusOut>", self._apply_yrange)
+            self.yentries[idx] = (lo, hi)
+        ttk.Label(bar3, text="   （取消勾选「自动缩放 Y」后生效；改完按回车）"
+                  ).pack(side=tk.LEFT)
 
         # 图形区
-        self.fig = Figure(figsize=(11, 6.4), dpi=100)
+        self.fig = Figure(figsize=(11, 5.6), dpi=100)
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-        self.axes = []
-        self.lines = []
-        for i in range(self.ch_count):
-            ax = self.fig.add_subplot(self.ch_count, 1, i + 1)
-            if i < self.ch_count - 1:
-                ax.set_xticklabels([])
-            ln, = ax.plot([], [], linewidth=0.9, color="C%d" % (i % 10))
-            ax.set_ylabel(self.names[i])
-            ax.grid(True, alpha=0.3)
-            ax.margins(x=0)
-            self.axes.append(ax)
-            self.lines.append(ln)
-        self.axes[-1].set_xlabel("%s      %s" % (self.L_TIME, self.L_HINT))
-        self.fig.tight_layout()
 
         # 状态栏
         self.status = tk.StringVar(value="未开始。点「开始」连接 ST-Link。")
         ttk.Label(self.root, textvariable=self.status, relief=tk.SUNKEN,
                   anchor=tk.W, padding=(6, 3)).pack(side=tk.BOTTOM, fill=tk.X)
+
+        # 空格键 = 冻结/解冻。一边用手转电机一边敲空格最顺手。
+        # 按钮设了 takefocus=0，否则点了按钮之后空格会去触发那个按钮。
+        self.root.bind("<space>", self._on_space)
+
+    def _on_space(self, _evt):
+        if self.reader is not None:
+            self._toggle_freeze()
+        return "break"
+
+    # ------------------------------------------------------------------
+    # 坐标轴（随通道开关动态重建）
+    # ------------------------------------------------------------------
+    def _rebuild_axes(self):
+        self.fig.clear()
+        self.axes = [None] * self.ch_count
+        self.lines = [None] * self.ch_count
+
+        visible = [i for i in range(self.ch_count) if self.show[i]]
+        if not visible:
+            self.canvas.draw_idle()
+            return
+
+        n = len(visible)
+        for k, i in enumerate(visible):
+            ax = self.fig.add_subplot(n, 1, k + 1)
+            if k < n - 1:
+                ax.set_xticklabels([])
+            ln, = ax.plot([], [], linewidth=0.9, color="C%d" % (i % 10))
+            ax.set_ylabel(self.names[i])
+            ax.grid(True, alpha=0.3)
+            ax.margins(x=0)
+            rng = self.yrange.get(i)
+            if rng:
+                ax.set_ylim(rng)
+            self.axes[i] = ax
+            self.lines[i] = ln
+
+        self.axes[visible[-1]].set_xlabel("%s      %s" % (self.L_TIME, self.L_HINT))
+        self.fig.tight_layout()
+        self.canvas.draw_idle()
+
+    def _apply_yrange(self, _evt=None):
+        for idx, (v_lo, v_hi) in self.yentries.items():
+            try:
+                lo = float(v_lo.get())
+                hi = float(v_hi.get())
+            except ValueError:
+                continue          # 输入非法就忽略，保留上一次的范围
+            if hi <= lo:
+                hi = lo + 1.0
+            self.yrange[idx] = (lo, hi)
+        self._redraw()
+
+    def _redraw(self):
+        for i in range(self.ch_count):
+            ax = self.axes[i]
+            if ax is None:
+                continue
+            rng = self.yrange.get(i)
+            if self.autoscale.get():
+                ax.relim()
+                ax.autoscale_view(scalex=False, scaley=True)
+            elif rng:
+                ax.set_ylim(rng)
+        self.canvas.draw_idle()
 
     # ------------------------------------------------------------------
     # 控制
@@ -164,7 +268,8 @@ class ScopeApp:
         self.thread.start()
         self.btn_run.config(text="■ 停止")
         self.btn_freeze.config(state=tk.NORMAL)
-        self.status.set("已连接 g_scope @ 0x%08X，采集中…" % self.reader.addr)
+        self.status.set("已连接 g_scope @ 0x%08X，采集中…   （空格键 = 冻结）"
+                        % self.reader.addr)
 
     def _stop(self):
         self.stop_flag.set()
@@ -175,7 +280,7 @@ class ScopeApp:
             self.reader.stop()
             self.reader = None
         self.btn_run.config(text="▶ 开始")
-        self.btn_freeze.config(state=tk.DISABLED, text="❄ 冻结")
+        self.btn_freeze.config(state=tk.DISABLED, text="❄ 冻结 (空格)")
         self.frozen_now = False
         self.status.set("已停止。")
 
@@ -189,16 +294,18 @@ class ScopeApp:
             messagebox.showerror("冻结失败", str(e))
             self.frozen_now = False
             return
-        self.btn_freeze.config(text="▶ 解冻" if self.frozen_now else "❄ 冻结")
+        self.btn_freeze.config(text="▶ 解冻 (空格)" if self.frozen_now
+                               else "❄ 冻结 (空格)")
+        if self.frozen_now:
+            self.status.set("❄ 已冻结 —— 缓冲停在触发瞬间，现在导出/存图都是这一帧。"
+                            "（空格解冻）")
 
     def _on_window_change(self, _evt=None):
         self.window = int(self.cmb_window.get())
 
     def _on_channel_toggle(self):
         self.show = [v.get() for v in self.ch_vars]
-        for i, ln in enumerate(self.lines):
-            ln.set_visible(self.show[i] and i < self.ch_count)
-        self.canvas.draw_idle()
+        self._rebuild_axes()
 
     # ------------------------------------------------------------------
     # 后台取数
@@ -215,7 +322,7 @@ class ScopeApp:
             try:
                 self.q.put(("data", info, samples, dt), timeout=1.0)
             except queue.Full:
-                pass   # 主线程没跟上就丢帧，不阻塞取数
+                pass   # 主线程没跟上就丢帧，绝不阻塞取数
 
     # ------------------------------------------------------------------
     # 主线程刷新
@@ -248,9 +355,11 @@ class ScopeApp:
         ch = info["channels"]
 
         for c in range(min(ch, self.ch_count)):
+            ax = self.axes[c]
+            if ax is None:               # 该通道被隐藏
+                continue
             y = [row[c] / self.divs[c] for row in samples]
             self.lines[c].set_data(t, y)
-            ax = self.axes[c]
             ax.set_xlim(t[0], 0)
             if self.autoscale.get():
                 lo, hi = min(y), max(y)
@@ -258,10 +367,13 @@ class ScopeApp:
                     hi, lo = lo + 1.0, lo - 1.0     # 平线时给个可视范围
                 pad = (hi - lo) * 0.1
                 ax.set_ylim(lo - pad, hi + pad)
+            else:
+                rng = self.yrange.get(c)
+                if rng:
+                    ax.set_ylim(rng)
 
         self.canvas.draw_idle()
 
-        # 刷新率统计
         self.frame_times.append(dt)
         if len(self.frame_times) > 20:
             self.frame_times.pop(0)
@@ -274,10 +386,27 @@ class ScopeApp:
                "  ❄已冻结" if info["frozen"] else ""))
 
     # ------------------------------------------------------------------
-    # 导出
+    # 导出：先冻结，保证存到的就是眼前这一帧
     # ------------------------------------------------------------------
+    def _ensure_frozen(self):
+        if self.reader is None or self.last_samples is None:
+            return False
+        if not self.frozen_now:
+            try:
+                self.reader.set_frozen(True)
+                self.frozen_now = True
+                self.btn_freeze.config(text="▶ 解冻 (空格)")
+                # 冻结后再取一帧，确保屏幕上的数据和要保存的一致
+                self.last_info, self.last_samples = self.reader.read(window=self.window)
+                self._update(self.last_info, self.last_samples, 0.001)
+            except Exception as e:
+                messagebox.showerror("冻结失败", str(e))
+                return False
+            self.status.set("导出前已自动冻结，保证存到的就是这一帧。（空格解冻）")
+        return True
+
     def _save_png(self):
-        if self.last_samples is None:
+        if not self._ensure_frozen():
             messagebox.showinfo("没有数据", "先点「开始」采一帧。")
             return
         path = filedialog.asksaveasfilename(
@@ -289,7 +418,7 @@ class ScopeApp:
         self.status.set("已保存图片: %s" % path)
 
     def _save_csv(self):
-        if self.last_samples is None:
+        if not self._ensure_frozen():
             messagebox.showinfo("没有数据", "先点「开始」采一帧。")
             return
         path = filedialog.asksaveasfilename(
@@ -306,7 +435,7 @@ class ScopeApp:
                 t = (i + 1 - n) * 1000.0 / fs
                 vals = [row[c] / self.divs[c] for c in range(len(row))]
                 f.write("%.4f," % t + ",".join("%.6g" % v for v in vals) + "\n")
-        self.status.set("已导出 CSV: %s" % path)
+        self.status.set("已导出 CSV: %s  （按空格解冻继续采集）" % path)
 
     def _on_close(self):
         self.stop_flag.set()
@@ -324,14 +453,27 @@ def main():
     ap.add_argument("--div", default=None, help="每通道除数，逗号分隔")
     ap.add_argument("--window", default=DEFAULT_WINDOW, choices=WINDOW_CHOICES,
                     help="显示窗口长度（样本数），越小刷新越快")
+    ap.add_argument("--ypos", default=None,
+                    help="位置 Y 轴范围 lo,hi（默认 0,360）")
+    ap.add_argument("--yspd", default=None,
+                    help="速度 Y 轴范围 lo,hi（默认 -200,200）")
     args = ap.parse_args()
 
     names = parse_list(args.names, len(DEFAULT_NAMES), DEFAULT_NAMES, cast=str)
     divs = parse_list(args.div, len(DEFAULT_DIVS), DEFAULT_DIVS, cast=float)
     divs = [(d if d else 1.0) for d in divs]
 
+    yrange = dict(DEFAULT_YRANGE)
+    for key, val, idx in (("ypos", args.ypos, 0), ("yspd", args.yspd, 1)):
+        if val:
+            try:
+                lo, hi = [float(x) for x in val.split(",")]
+                yrange[idx] = (lo, hi)
+            except ValueError:
+                print("警告: --%s 格式应为 lo,hi，已忽略" % key, file=sys.stderr)
+
     root = tk.Tk()
-    ScopeApp(root, names=names, divs=divs, window=args.window)
+    ScopeApp(root, names=names, divs=divs, window=args.window, yrange=yrange)
     root.mainloop()
 
 
