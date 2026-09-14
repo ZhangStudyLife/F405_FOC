@@ -50,44 +50,17 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths
 )
 
-# Add sources to executable
-#
-# App/ 是本工程的业务代码层，分层依赖规则见 App/README.md：
-#   App/Hardware/   外设驱动 + HAL 封装（驱动本体不含 HAL，板级 port 才含）
-#   App/Protocols/  通信协议（纯逻辑，不碰硬件）
-#   App/FOC/        电机控制算法（纯逻辑，不碰硬件）
-#
-# 注意：不要去改 cmake/stm32cubemx/CMakeLists.txt —— 那个文件每次 CubeMX
-#       重新生成都会被覆盖；本文件只生成一次，才是可以安全手工维护的地方。
+# ADC bring-up: no motor-control state machine or encoder in the sampling path.
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    # ---- App/Hardware/bsp：HAL 封装层 ----
-    App/Hardware/bsp/bsp_gpio.c
-    App/Hardware/bsp/bsp_spi.c
+    App/Control/adc_test.c
+    App/Hardware/bsp/bsp_adc.c
     App/Hardware/bsp/bsp_time.c
-
-    # ---- App/Hardware/mt6835：21-bit 磁编码器驱动 ----
-    App/Hardware/mt6835/mt6835.c
-    App/Hardware/mt6835/mt6835_port_stm32.c
-
-    # ---- App/Protocols/scope：RAM 示波器（主机经 SWD 抓取）----
-    # scope_encoder.c 是"编码器 -> 示波器"的绑定层，通道布局与放大系数都在里面。
-    # main.c 里若没有调用它，--gc-sections 会把这两个文件整个丢掉，
-    # Flash 和 RAM 一分不占。
     App/Protocols/scope/scope.c
-    App/Protocols/scope/scope_encoder.c
 )
-
-# Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+    App/Control
     App/Hardware/bsp
-    App/Hardware/mt6835
     App/Protocols/scope
-
-    # 下面几条等对应目录真正有头文件时再打开
-    # （现在只有 .gitkeep，加空 include 路径没有意义）：
-    # App/Hardware
-    # App/Protocols
-    # App/FOC
 )
 
 # Add project symbols (macros)

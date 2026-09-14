@@ -1,4 +1,71 @@
+## 2026-09-14 更新：USART2 高速调试发送 TX-DMA
+
+本次按“USART2 以 460800 波特率高频发送 debug 数据、必须 DMA、尽量少占用 CPU”配置并由本机 STM32CubeMX 6.15.0 命令行重新生成。本节是当前 USART2/DMA 配置的准则，后文较早的 ADC 配置记录中若有相反表述，以本节为准。配置入口仍为 [405_FOC.ioc](405_FOC.ioc)，生成脚本为 [uart2-generate.mx](validation/uart2-generate.mx)。
+
+### 最终硬件配置
+
+| 项目 | 配置 |
+|---|---|
+| MCU | STM32F405RGT6 / STM32F405RGTx，LQFP64 |
+| 外设 | USART2，异步模式 |
+| TX 引脚 | PA2 / USART2_TX，AF7 |
+| RX 引脚 | PA3 / USART2_RX，保留复用但本项目不使用接收功能 |
+| 串口格式 | 460800 baud，8 data bits，1 stop bit，无校验，无硬件流控，16 倍过采样 |
+| ADC 触发比较通道 | TIM8 CH4，No Output，Toggle，CCR4=4100 |
+| TX DMA | DMA1 Stream6 / Channel 4，USART2_TX |
+| DMA 方向 | Memory-to-Peripheral |
+| 数据宽度 | Peripheral/Memory 均 Byte |
+| 地址递增 | Memory increment 开启，Peripheral increment 关闭 |
+| DMA 模式 | Normal；FIFO 关闭；High priority |
+| DMA 中断 | DMA1_Stream6_IRQn，抢占优先级 5、子优先级 0，已启用 |
+| USART 中断 | USART2_IRQn，抢占优先级 6、子优先级 0，已启用 |
+
+选择 TX-only DMA 是为了不额外占用 RX DMA 通道、RX DMA 中断和接收缓冲管理。USART2 在 CubeMX 中保留 `MODE_TX_RX` 以确保 F4 数据库能稳定保存并再次生成；没有调用接收 API 就不会产生接收 CPU 负担。TIM8 CH4 使用数据库允许的 `OCMode_4=TIM_OCMODE_TOGGLE`；在本板实测中，默认 `TIMING` 只产生 CC4 标志而不能驱动 ADC injected，Toggle 才能稳定产生 20 kHz 采样帧。后续发送应按“准备一块连续缓冲区 → `HAL_UART_Transmit_DMA(&huart2, buf, len)` → 完成回调/队列下一块”使用；DMA 负责逐字节搬运，CPU 只在提交数据和每个缓冲区完成时介入。460800 baud、8N1 的线速上限约为 46080 byte/s，实际吞吐还取决于上位机和包长度。
+
+### 生成与验证结果
+
+- CubeMX 日志：[uart2-generation-usartirq.log](validation/uart2-generation-usartirq.log)，`project generate` 返回 0，`Clock Configuration Error: false`，`Pinout & Configuration Error: false`。
+- 生成代码新增/启用 `Core/Src/usart.c`、`Core/Src/dma.c`、`Core/Inc/usart.h`、`Core/Inc/dma.h` 及 `stm32f4xx_hal_uart.c`；HAL MSP 中包含 USART2 GPIO、DMA link 和 DMA1 时钟/IRQ 初始化。
+- `Core/Src/stm32f4xx_it.c` 已生成 `HAL_DMA_IRQHandler(&hdma_usart2_tx)` 和 `HAL_UART_IRQHandler(&huart2)`；DMA/USART 完成状态可以正常进入 HAL 分发。
+- ADC 上板验证：[uart2-final-adc-capture/report.json](validation/uart2-final-adc-capture/report.json) 通过，连续采集 1024 帧，帧率 20000 Hz，主从 ADC 完成、周期、功率引脚低电平和 CH4 使能检查全部通过；最终 Release 下载及 verify 见 [uart2-final-program-release.log](validation/uart2-final-program-release.log)。
+- USART2 DMA 上板验证：[uart2-final-dma-gdb.log](validation/uart2-final-dma-gdb.log) 通过：空闲时 `HAL_UART_Transmit_DMA()` 返回 0（HAL_OK），发送后 `huart2.gState=0x20`（READY）、`NDTR=0`、DMA `CR=0`，表明 DMA 数据搬运和 USART 完成中断均已收尾。
+- 配置审计：[uart2-audit-final.log](validation/uart2-audit-final.log) 通过，覆盖 `.ioc` 参数、生成 HAL、DMA/USART IRQ 和构建产物。
+- 二次重生成：[uart2-regeneration.log](validation/uart2-regeneration.log) 返回 0；前后 `.ioc` SHA-256 一致，配置可重复生成。
+- Debug： [uart2-final-build-Debug.log](validation/uart2-final-build-Debug.log) 通过，FLASH 22928 B、RAM 26736 B，0 warning / 0 error；下载校验见 [uart2-final-program-debug.log](validation/uart2-final-program-debug.log)。
+- Release： [uart2-final-build-Release.log](validation/uart2-final-build-Release.log) 通过，FLASH 12372 B、RAM 26736 B，0 warning / 0 error。
+
+### 接线与边界
+
+原理图当前没有证据表明 PA2/PA3 已布线到板载 USB/串口连接器。因此实际接上位机时应使用 **3.3 V 电平 USB-UART**：PA2 → 适配器 RX，板 GND → 适配器 GND；PA3 可不接。上位机设置 460800、8N1、无流控。本次已实测 ST-LINK 下载/verify、ADC 20 kHz 采样和 MCU 内部 USART2 TX-DMA 发起/完成；当前环境未检测到可用 USB-UART 适配器，因此尚未用上位机抓取 PA2 外部字节波形。
+
+---
+
+> 当前启动行为以 `tests/ADC_TEST.md` 为准：独立 ADC 采集已上板验证，六路功率引脚固定为 GPIO 低电平。下文保留配置生成记录，不能作为整套 FOC 已验收的依据。
+
 # STM32F405 M1 FOC CubeMX 配置报告
+
+## 2026-09-13 更新：双 ADC 注入 rank 2
+
+本次按最新授权直接修改 `.ioc` 并通过本机 CubeMX 6.15.0 命令行实际生成。以下更新取代下文初版报告中“单档、未配置温度/母线”的描述；原有 FOC 应用代码未改动。
+
+| ADC | rank 1（保持） | rank 2（新增） | 注入长度 |
+|---|---|---|---|
+| ADC1 | PC3 / CH13，B 相，28 cycles | PA4 / CH4，M1_TEMP，15 cycles | 2 |
+| ADC2 | PC2 / CH12，C 相，28 cycles | PA6 / CH6，VBUS_S，15 cycles | 2 |
+
+- 实际生成两次 `HAL_ADCEx_InjectedConfigChannel()`/ADC，rank 2 继承 `InjectedNbrOfConversion=2`。CubeMX 自动启用两路 ScanConvMode，这是多档序列所需；常规组通道、长度、采样时间保持原样。
+- ADC2 外部触发参数完全未改，ADC1 仍为 T8_CC4/Rising，双 ADC injected simultaneous、21 MHz、12-bit/right 不变。JAUTO 清除补丁保留。
+- `FOC_HW_ADC_RANK` 已从 1u 改成 **2u**。`validation/verify_config.py` 按实际 HAL 配置调用顺序检查两个 rank，而非只检查字符串是否出现。
+- TIM8、SPI3、GPIO、RCC 配置未改；DMA1 Stream6 TX 完成中断按本报告前文启用。与本次开始时备份逐字比较，`main.c`、中断文件、`tim.c`、`spi.c`、`gpio.c`、顶层 CMakeLists.txt 文本均保留已有未提交开发代码。
+- Debug/Release 均干净构建 **49/49 通过，0 warning / 0 error**；Debug Flash 35488 B/RAM 3136 B，Release Flash 20436 B/RAM 3128 B。验证脚本通过。
+- rank 1 采样孔径不变；rank 2 增加约 `(15+12)/21 MHz=1.286 µs`，整帧约 3.190 µs（不含触发同步延迟），序列完成中断相应晚到。未修改电流环或 PWM 时序。
+- 未上板，不能声称已经读到 `foc_hw_stm32_adc_rank()==2`、`selfcheck()==0` 或故障位清除；这三项仍需上板验证。
+
+本次证据：[配置 diff](validation/adc-rank2-ioc.diff)、[生成日志](validation/adc-rank2-generation.log)、[Debug](validation/adc-rank2-build-Debug.log)、[Release](validation/adc-rank2-build-Release.log)、[审计](validation/adc-rank2-audit.log)、[未改项检查](validation/adc-rank2-preservation.log)。备份位于 `validation/adc-rank2-terminal-before/`。
+
+本次没有 ADC/IP not ready，无需执行降级方案。生成日志的 Clock/Pinout Error 均为 false。仍有下文已说明的 CubeMX RIF 虚拟引脚及第三方 PDSC 索引告警；`project path` 对已加载的相同目录返回 KO，但实际生成路径正确且 `project generate` 返回 OK，生成文件及两种构建均已核实。
+
+---
 
 验证日期：2026-09-11。工程目录：`E:\405_FOC\405_FOC`。
 
@@ -61,7 +128,7 @@ M0、RTC、LSE、JTAG、USB、CAN 等未启用。M1_TEMP（PA4/IN4）、VBUS_S�
 - Internal Clock，Slave Mode Disable；没有 `HAL_TIM_SlaveConfigSynchro()`，不使用 Gated/Trigger slave。
 - Center-Aligned Mode 1，PSC=0，ARR=4200，CKD=DIV1，RCR=0，ARR preload Enable。
 - CH1/2/3 均为 PWM mode 1，三对互补输出，共用 TIM8 计数器。主输出及互补输出均为高有效、idle reset，初始 CCR1/2/3=0。
-- CH4 为 Output Compare / Timing、No Output，CCR4=4100；无 CH4 GPIO，无 MOSFET 连接。
+- CH4 为 Output Compare / Toggle、No Output，CCR4=4100；无 CH4 GPIO，无 MOSFET 连接。Toggle 是本板实测能驱动 ADC injected 采样的 CH4 内部比较模式。
 - BDTR dead time=84；Break Disable，AutomaticOutput Disable，Lock OFF，OSSR/OSSI Disable。
 - 初始化不调用任何 PWM/PWMN/OC/Base Start。初始零占空比不等于“互补两管同时关断”：若以后主动使能互补输出，PWM1 零占空比对应高侧关、低侧导通。当前骨架通过不启动输出来保持未使能状态。
 
@@ -90,7 +157,7 @@ DT = DTG[7:0] × tDTS = 84 / 168 MHz = 500 ns
 ## 8. ADC1 配置
 
 - 主 ADC，PC3 / channel 13 / M1_SO1，12-bit、右对齐。
-- 注入序列 1 个转换、rank 1，28 cycles，offset=0。
+- 注入序列 2 个转换；rank 1 电流通道为 28 cycles，rank 2 慢通道为 15 cycles，offset=0。
 - External injected trigger：TIM8_CC4，Rising edge。
 - Continuous、discontinuous、auto-injected、DMA continuous requests 均关闭。
 - CubeMX 同时保留相同引脚的 regular rank 1（28 cycles、software trigger），主程序不启动 regular 转换；FOC 主采样只使用 injected。
@@ -98,7 +165,7 @@ DT = DTG[7:0] × tDTS = 84 / 168 MHz = 500 ns
 ## 9. ADC2 配置
 
 - 从 ADC，PC2 / channel 12 / M1_SO2，12-bit、右对齐。
-- 注入序列 1 个转换、rank 1，28 cycles，offset=0。
+- 注入序列 2 个转换；rank 1 电流通道为 28 cycles，rank 2 慢通道为 15 cycles，offset=0。
 - 转换启动由 ADC1 多 ADC 硬件同步分发，不独立设置第二个外部触发。
 - Continuous/discontinuous 关闭；同样存在未启动的 regular rank 1。
 - CubeMX 生成的 AutoInjected=ENABLE 已在 USER CODE 中清除 JAUTO，最终由主 ADC 同步触发，见第 15 节。
@@ -119,7 +186,7 @@ TIM8_CH4 timing compare，CCR4=4100；Center-Aligned Mode 1 的输出比较事�
 
 这是可调整的初始低侧电流采样时刻，接近计数器顶部的 PWM1 低侧零矢量区。后续 SVPWM 必须保证 B/C 两个低侧开关在采样窗内都稳定导通，并为死区、运放建立时间和整个 ADC 采样窗留出余量；高调制度时需要限制占空比或调整 CCR4。固定触发配置本身不保证所有占空比下的双分流可观测性。
 
-本版未 arm ADC/TIM8，所以不会自行进入 ISR。后续启动应先使能从 ADC2，再用 ADC1 injected interrupt start 等待硬件事件，最后启动 TIM8 的采样时基；只对 ADC1 开 JEOC 中断，并在其回调内读取两路 JDR。功率输出使能应在零偏校准、有效采样窗和控制逻辑就绪后单独完成，不要把普通 while 软件启动作为采样时基。
+CubeMX 初始化本身不启动 ADC/TIM8；当前 `adc_test` bring-up 会在初始化后单独启动安全的 CH4 采样时基。正式控制流程仍应先使能从 ADC2，再用 ADC1 injected interrupt start 等待硬件事件，最后启动 TIM8 的采样时基；只对 ADC1 开 JEOC 中断，并在其回调内读取两路 JDR。功率输出使能应在零偏校准、有效采样窗和控制逻辑就绪后单独完成，不要把普通 while 软件启动作为采样时基。
 
 ## 12. SPI3 最终配置
 
@@ -133,7 +200,7 @@ PA0-WKUP，User Label=`MT6835_CS`，普通 GPIO Output Push-Pull，No Pull，Low
 
 ## 14. NVIC 配置
 
-NVIC_PRIORITYGROUP_4。ADC_IRQn=抢占优先级 **0** / 子优先级 0；SysTick=15。共享 `ADC_IRQHandler()` 由 CubeMX 生成，调用两个 HAL ADC handler；实际 JEOC 中断使能属于之后的 arm/start 动作，本版尚未启动。未开启 TIM8 Update、TIM8 CC、SPI3、DMA 等应用中断。
+NVIC_PRIORITYGROUP_4。ADC_IRQn=抢占优先级 **0** / 子优先级 0；SysTick=15。共享 `ADC_IRQHandler()` 由 CubeMX 生成，调用两个 HAL ADC handler；实际 JEOC 中断使能属于之后的 arm/start 动作，本版尚未启动。未开启 TIM8 Update、TIM8 CC、SPI3 应用中断；USART2 TX 使用的 DMA1_Stream6 中断已启用，详见本报告首节。
 
 ## 15. CubeMX 无法直接实现、需要 USER CODE 补充的部分
 
