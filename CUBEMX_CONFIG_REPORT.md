@@ -1,3 +1,149 @@
+## 2026-09-15 更新：CAN1 加入工程（PB8/PB9，1 Mbps）
+
+本次在 `.ioc` 中启用 CAN1 并由本机 CubeMX 6.15.0 命令行重新生成；同时新增 App 侧
+`bsp_can` 模块。**未上板**，因此下面"已核实"的部分仅指配置与构建，不含波形实测。
+
+### 为什么是 PB8/PB9
+
+原理图给出的网络是确定的：MCU **pin61 = CAN1RX/PB8 → `CAN R`**，
+**pin62 = CAN1TX/PB9 → `CAN D`**，两网络直接接板载 **TJA1051T/3（U1）** 的
+pin4 RXD / pin1 TXD。收发器 CANH(pin7)/CANL(pin6) 引到 `CAN H`/`CAN L`，
+之间挂 `R3 120Ω`，由 **SW1(1↔4)** 控制通断。
+
+LQFP64 上 CAN1 的另一组候选 PA11/PA12 是 USB_DM/DP，CAN2 的 PB5/PB6 在原设计里
+是编码器 TIM4 —— 都不用。**LQFP64 没有 PD0/PD1**，CAN1 重映射到 PD0/PD1 的方案不存在。
+
+### 最终硬件配置
+
+| 项目 | 配置 |
+|---|---|
+| 外设 | CAN1，`CAN_MODE_NORMAL` |
+| RX / TX 引脚 | PB8 / PB9，AF9，GPIO_SPEED_FREQ_VERY_HIGH |
+| Prescaler | 3 |
+| BS1 / BS2 / SJW | 8TQ / 5TQ / 2TQ |
+| 波特率 | 42 MHz / (3 × (1+8+5)) = **1 000 000 bit/s** |
+| 采样点 | (1+8)/14 = **64.3 %** |
+| TTCM / AWUM | DISABLE |
+| ABOM（自动离线恢复） | **ENABLE** |
+| 自动重传 | **ENABLE** |
+| RFLM / TXFP | DISABLE |
+| 中断 | CAN1_TX_IRQn、CAN1_RX0_IRQn，抢占优先级 **7** / 子 0 |
+
+优先级 7 是刻意低于 USART2(6) 和 DMA1_Stream6(5)，避免 CAN 中断抢占 20 kHz 电流环
+（ADC 仍为最高的 0）。
+
+### 两个必须记住的坑
+
+1. **`.ioc` 里的 `CAN1.NART` 是反的。** 参数名沿用了硬件位名（No Automatic
+   Retransmission），但它的值语义等于 UI 上的 "Automatic Retransmission" 复选框。
+   实测：`NART=DISABLE` → 生成 `hcan1.Init.AutoRetransmission = DISABLE`
+   → HAL 置位 `CAN_MCR_NART` → **关闭自动重传**。要开启必须写
+   `CAN1.NART=ENABLE`。本工程已按后者配置。
+2. **`set ip parameters` 对未知参数名不报错。** 用 FDCAN 的参数名
+   （`TimeSeg1/TimeSeg2/SyncJumpWidth`）写 F4 的 bxCAN，CLI 全部返回 OK 并写进
+   `.ioc`，但 CubeMX 计算时忽略它们，`CalculateBaudRate` 会停在错误值
+   （实测 4666666），且 `isPluginError "Pinout & Configuration"` 报 true。
+   正确名称是 **`BS1`/`BS2`/`SJW`**，取值形如 `CAN_BS1_8TQ`（见
+   `db/mcu/IP/CAN-bxcan1_v1_1_Cube_Modes.xml`）。
+
+### 生成与验证结果
+
+- 生成脚本 [can1-generate.mx](validation/can1-generate.mx)：`project generate` 返回 0，
+  `Clock Configuration Error: false`、`Pinout & Configuration Error: false`。
+  （`project path` 对已加载的相同目录仍返回 KO，是既有的已知现象，生成路径正确。）
+- CubeMX 自动完成、无需手改的项：`HAL_CAN_MODULE_ENABLED` 取消注释；
+  `cmake/stm32cubemx/CMakeLists.txt` 加入 `stm32f4xx_hal_can.c`；
+  `main.c` 调用 `MX_CAN1_Init()`；`stm32f4xx_it.c` 生成
+  `CAN1_TX_IRQHandler` / `CAN1_RX0_IRQHandler`，均转 `HAL_CAN_IRQHandler(&hcan1)`。
+- 重新生成后 **ADC2 的 JAUTO USER CODE 补丁完整保留**（`Core/Src/adc.c` 第 182 行）。
+- Debug / Release 均 **40/40 通过，0 warning / 0 error**。
+  Debug FLASH 27132 B / RAM 27064 B；Release FLASH 14616 B / RAM 27064 B。
+- 证据：[生成日志](validation/can1-generation2.log)、[参数核对](validation/can1-init-values.txt)、
+  [Debug 构建](validation/can1-bsp-build-Debug.log)、[Release 构建](validation/can1-bsp-build-Release.log)。
+  改动前的备份：[405_FOC.ioc.can1-bak](405_FOC.ioc.can1-bak)、[can1-before.ioc](validation/can1-before.ioc)。
+
+### 上板验证（2026-09-15，ST-Link + STM32CubeProgrammer v2.19.0）
+
+Release 固件 `Download verified successfully`（14.94 KB），复位后运行正常。
+
+**先记一个会误导人的工具坑**：`STM32_Programmer_CLI -c port=SWD` 的**默认连接模式会执行
+`Software reset`**（日志里写 `Reset mode: Software reset`），此刻读到的外设寄存器全是**复位值**，
+看起来就像"程序根本没跑"。必须加 `mode=hotplug` 才是 hot-plug 到运行中的内核、halt 后读真实状态：
+
+```bash
+# 读运行态（正确）
+STM32_Programmer_CLI -c port=SWD mode=hotplug -r32 0x40006400 32
+```
+
+CAN1 运行态实测（hotplug 读取）：
+
+| 寄存器 | 实测值 | 判读 |
+|---|---|---|
+| `CAN_MCR` | `0x00010040` | INRQ=0（已离开初始化）、SLEEP=0、ABOM=1、NART=0（自动重传开） |
+| `CAN_MSR` | `0x00000C08` | INAK=0、SLAK=0、**SAMP=1（总线集成完成）**、RX=1（总线空闲） |
+| `CAN_BTR` | `0x01470002` | BRP=2(÷3)、TS1=7(8TQ)、TS2=4(5TQ)、SJW=1(2TQ) → **1 Mbps**，与 `.ioc` 一致 |
+| `CAN_IER` | `0x00000002` | FMPIE0=1，RX FIFO0 中断已使能 |
+| `CAN_ESR` | `0x00000000` | 零错误 |
+| `GPIOB.AFRH` | `0x00000099` | PB8/PB9 = **AF9** |
+| `RCC_APB1ENR` | `0x12028000` | CAN1EN 已置位 |
+
+`MSR.SAMP=1` 只有在采样点连续采到 11 个隐性位、完成总线集成后才会置位；配合
+`GPIOB.IDR` 的 bit8=1（PB8 读到隐性高电平），说明**板载 TJA1051 已供电并在无总线时正确输出隐性**。
+
+**回环自测**：`main.c` 上电执行一次 `bsp_can_selftest()`，结果写入全局
+`g_can_selftest_out[4]`（`.bss` @ `0x20000030`）。hotplug 读回：
+
+```
+0x20000030 : 00000001 00000001 00000001 00000000
+                ↑selftest  ↑rx_total ↑tx_total ↑rx_lost
+```
+
+自测通过（1/1/1/0），且 `CAN_TSR = 0x1C000003` 独立佐证：`TXOK0=1`（邮箱 0 发送成功）、
+`RQCP0=1`（请求完成）、`ALST0=TERR0=0`（无仲裁丢失/发送错误）。这验证了
+**发送 → 回送 → FIFO → 中断 → 软件队列 → 出队** 整条链路。
+
+**边界（这条自测证明不了什么）**：回环模式不出物理层，报文不经过 TJA1051、不经过线缆，
+因此它**无法证明接线正确**。真正确认收发需要接上第二个节点（达妙 DM-USB-CAN）后做一次实报收发。
+
+**顺带澄清一个看似异常的现象**：`GPIOB.MODER` 读到 PB0/PB1 是"通用输出"而非"复用"，
+这不是配置错误 —— `App/Control/adc_test.c` 有意把六路功率引脚（PA7/PB0/PB1/PC6/PC7/PC8）
+设为 GPIO 输出低电平并清除 `TIM8->BDTR` 的 MOE，是 bring-up 阶段防止功率级误导通的安全设计。
+
+### App 侧新增：`bsp_can`
+
+`App/Hardware/bsp/bsp_can.h/.c`，按 `App/README.md` 的分层约定实现
+（头文件不含 HAL 类型，错误码为本层枚举）。提供：全通过过滤器 + 启动、
+非阻塞发送、中断接收队列（深度 `BSP_CAN_RX_QUEUE_LEN`，默认 16）、
+正常/回环/静默回环模式切换、`bsp_can_selftest()` 回环自测与丢帧统计。
+
+接收回调**一次把 FIFO 读空再返回**：bxCAN 的 FMPIE0 是电平触发的，
+只要 `RF0R.FMP0 != 0`，`HAL_CAN_IRQHandler` 会反复进入，留帧不读会立刻重入甚至溢出。
+
+`main.c` 只在 USER CODE 区加了两行：`USER CODE BEGIN PV` 里的 `bsp_can_t g_can1;`
+和 `USER CODE BEGIN 2` 里的 `bsp_can_init(&g_can1, &hcan1);`。默认不跑自测。
+
+### 接线与边界
+
+- 达妙 **DM-USB-CAN**（USB 转 CAN，5 kbps~1 Mbps，64 KB 缓冲，GH1.25 2P 的 H/L）
+  与板子 **H 接 H、L 接 L**，不交叉。
+- 终端电阻：模块的开关拨到 ON，板上的 SW1 也接上 120Ω —— 总线两端各一个才匹配。
+- **TJA1051 的 VCC 是 5V，必须给板子上电 CAN 才工作**；仅插调试器不够。
+- 待确认（通电前）：① TJA1051 pin5 VIO 接的 `VCC` 网络是否真的是 3.3V
+  （若是 5V，TXD 的 VIH = 0.7×5 = 3.5 V > PB9 输出的 3.3 V，可能识别不了高电平）；
+  ② SW1 的两路（120Ω 与 BOOT0/R4）是否联动 —— 若联动，断开终端电阻会同时把
+  BOOT0 拉高，芯片从系统存储器启动、Flash 程序不运行。
+- **速率上限 1 Mbps**，三方都不支持 CAN FD：F405 只有经典 bxCAN，
+  DM-USB-CAN 规格最大 1 Mbps，TJA1051 是经典 CAN 收发器。
+
+### 一个遗留问题（与本次改动无关）
+
+`validation/verify_config.py` 当前**无法运行**：第 94 行读取
+`App/Hardware/foc/foc_hw_stm32.h`，该路径在当前工程中已不存在，抛
+`FileNotFoundError` 并退出 1。这是脚本先于代码结构演进导致的过时问题，
+在本次改动之前就存在，需要单独修（补路径或补齐缺失文件）。
+
+---
+
 ## 2026-09-14 更新：USART2 高速调试发送 TX-DMA
 
 本次按“USART2 以 460800 波特率高频发送 debug 数据、必须 DMA、尽量少占用 CPU”配置并由本机 STM32CubeMX 6.15.0 命令行重新生成。本节是当前 USART2/DMA 配置的准则，后文较早的 ADC 配置记录中若有相反表述，以本节为准。配置入口仍为 [405_FOC.ioc](405_FOC.ioc)，生成脚本为 [uart2-generate.mx](validation/uart2-generate.mx)。
