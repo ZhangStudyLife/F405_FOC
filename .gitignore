@@ -27,6 +27,11 @@ scope*.csv
 *.swo
 *~
 
+# ---- AI 助手本地记忆 ----
+# .workbuddy/memory 是会话工作日志(每日追加),只服务本地助手,不是工程组成;
+# 其中记录的是过程与踩坑,不属于固件源码,不应进版本控制
+.workbuddy/
+
 # ---- 操作系统 ----
 Thumbs.db
 Desktop.ini
