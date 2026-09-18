@@ -338,8 +338,7 @@ float mt6835_speed_rpm(const mt6835_t *dev);
 
 /**
   * @brief  未滤波的差分速度，rad/s。
-  * @note   波形会很毛糙 —— 这正是它的用途：观察量化噪声有多大，
-  *         据此决定低通要多重。上板看波形时建议把它和滤波后的并排画。
+  * @note   该值包含明显的量化噪声，可用于评估低通滤波需求。
   */
 float mt6835_speed_raw_rad_s(const mt6835_t *dev);
 

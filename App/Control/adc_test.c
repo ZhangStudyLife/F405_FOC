@@ -1,7 +1,6 @@
 #include "adc_test.h"
 #include "bsp_adc.h"
 #include "bsp_time.h"
-#include "scope.h"
 #include "stm32f4xx_hal.h"
 #include "usart.h"
 
@@ -15,7 +14,6 @@ volatile struct {
     uint32_t isr_max_cycles;
     uint32_t incomplete_pairs;
 } g_adc_test;
-static scope_t s_adc_scope;
 static uint32_t s_previous_cycles;
 static uint8_t s_uart_tx[16];
 static uint32_t s_uart_next_ms;
@@ -44,7 +42,6 @@ void adc_test_init(void)
     TIM8->SR = 0u;
     DBGMCU->APB2FZ |= DBGMCU_APB2_FZ_DBG_TIM8_STOP;
 
-    scope_init(&s_adc_scope, 20000u);
     g_adc_test.period_min_cycles = UINT32_MAX;
     s_uart_next_ms = HAL_GetTick() + 1u;
     g_adc_test.started = bsp_adc_start() ? 1u : 0u;
@@ -83,7 +80,6 @@ void adc_test_poll(void)
 void adc_test_isr(void)
 {
     uint32_t start = DWT->CYCCNT;
-    uint32_t timer_count = TIM8->CNT;
     bsp_adc_frame_t frame;
     if (!bsp_adc_read(&frame)) {
         g_adc_test.incomplete_pairs++;
@@ -101,10 +97,6 @@ void adc_test_isr(void)
     g_adc_test.raw[1] = frame.s[0];
     g_adc_test.raw[2] = frame.m[1];
     g_adc_test.raw[3] = frame.s[1];
-    int32_t values[SCOPE_CHANNELS] = {
-        frame.m[0], frame.s[0], frame.m[1], frame.s[1], (int32_t)period, (int32_t)timer_count
-    };
-    scope_push(&s_adc_scope, values);
     g_adc_test.samples++;
     uint32_t elapsed = DWT->CYCCNT - start;
     if (elapsed > g_adc_test.isr_max_cycles) g_adc_test.isr_max_cycles = elapsed;

@@ -56,12 +56,10 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/Hardware/bsp/bsp_adc.c
     App/Hardware/bsp/bsp_can.c
     App/Hardware/bsp/bsp_time.c
-    App/Protocols/scope/scope.c
 )
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     App/Control
     App/Hardware/bsp
-    App/Protocols/scope
 )
 
 # Add project symbols (macros)
