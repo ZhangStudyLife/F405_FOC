@@ -1,5 +1,8 @@
 # ADC 上板采集验收
 
+> UART 部分为 2026-09-14 历史记录。当前 ADC 不调用串口发送；
+> 独立 JustFloat 驱动与实测记录见 [UART_TEST.md](UART_TEST.md)。
+
 日期：2026-09-14。设备：STM32F405 + ST-Link V2，OpenOCD 0.12.0。
 本轮目标：六路功率输出关闭时，独立验证 20 kHz 双 ADC 注入采样。
 

@@ -56,9 +56,12 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/Hardware/bsp/bsp_adc.c
     App/Hardware/bsp/bsp_can.c
     App/Hardware/bsp/bsp_time.c
+    App/Hardware/bsp/bsp_uart.c
+    App/Protocols/JustFloat/justfloat.c
 )
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     App/Control
+    App/Protocols/JustFloat
     App/Hardware/bsp
 )
 
@@ -76,3 +79,8 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 
     # Add user defined libraries
 )
+
+# These two small hot paths favor latency over the project's default -Os.
+set_source_files_properties(
+    App/Hardware/bsp/bsp_uart.c App/Protocols/JustFloat/justfloat.c
+    PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-O3>")

@@ -2,7 +2,6 @@
 #include "bsp_adc.h"
 #include "bsp_time.h"
 #include "stm32f4xx_hal.h"
-#include "usart.h"
 
 /* SWD observation only; no commands can enable power outputs. */
 volatile struct {
@@ -15,9 +14,6 @@ volatile struct {
     uint32_t incomplete_pairs;
 } g_adc_test;
 static uint32_t s_previous_cycles;
-static uint8_t s_uart_tx[16];
-static uint32_t s_uart_next_ms;
-static uint16_t s_uart_sequence;
 
 void adc_test_init(void)
 {
@@ -43,38 +39,11 @@ void adc_test_init(void)
     DBGMCU->APB2FZ |= DBGMCU_APB2_FZ_DBG_TIM8_STOP;
 
     g_adc_test.period_min_cycles = UINT32_MAX;
-    s_uart_next_ms = HAL_GetTick() + 1u;
     g_adc_test.started = bsp_adc_start() ? 1u : 0u;
     if (g_adc_test.started != 0u) {
         TIM8->BDTR |= TIM_BDTR_MOE; /* CH4 only; gate pins remain GPIO low. */
         TIM8->CR1 |= TIM_CR1_CEN;
     }
-}
-
-void adc_test_poll(void)
-{
-    uint32_t now = HAL_GetTick();
-    uint16_t sequence;
-
-    if ((int32_t)(now - s_uart_next_ms) < 0) return;
-    s_uart_next_ms = now + 1u;
-    if (HAL_UART_GetState(&huart2) != HAL_UART_STATE_READY) return;
-
-    sequence = s_uart_sequence++;
-    s_uart_tx[0] = 0xA5u;
-    s_uart_tx[1] = 0x5Au;
-    s_uart_tx[2] = (uint8_t)sequence;
-    s_uart_tx[3] = (uint8_t)(sequence >> 8);
-    for (uint32_t i = 0u; i < 4u; ++i) {
-        uint16_t value = (uint16_t)g_adc_test.raw[i];
-        s_uart_tx[4u + 2u * i] = (uint8_t)value;
-        s_uart_tx[5u + 2u * i] = (uint8_t)(value >> 8);
-    }
-    s_uart_tx[12] = (uint8_t)g_adc_test.samples;
-    s_uart_tx[13] = (uint8_t)(g_adc_test.samples >> 8);
-    s_uart_tx[14] = (uint8_t)(g_adc_test.samples >> 16);
-    s_uart_tx[15] = (uint8_t)(g_adc_test.samples >> 24);
-    (void)HAL_UART_Transmit_DMA(&huart2, s_uart_tx, sizeof s_uart_tx);
 }
 
 void adc_test_isr(void)

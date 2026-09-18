@@ -31,6 +31,7 @@
 #include "bsp_time.h"
 #include "adc_test.h"
 #include "bsp_can.h"
+#include "bsp_uart.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -110,6 +111,7 @@ int main(void)
   MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
   bsp_time_init();
+  if (!bsp_uart_init(3500000u)) Error_Handler();
   adc_test_init();
 
   /* CAN1：配置"全通过"过滤器 → 打开 RX FIFO0 中断通知 → Start。
@@ -137,7 +139,6 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    adc_test_poll();
   }
   /* USER CODE END 3 */
 }
