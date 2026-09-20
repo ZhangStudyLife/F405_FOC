@@ -4,6 +4,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define FOC_BUS_MIN 8.0f
+#define FOC_BUS_MAX 28.0f /* 24 V nominal; stop on regenerative overvoltage. */
+
 /* Nominal timing, pending scope validation of ADC/driver/analog delays. */
 #ifndef FOC_TRIGGER_TICKS
 #define FOC_TRIGGER_TICKS 4100u

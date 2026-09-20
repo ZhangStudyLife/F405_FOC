@@ -112,7 +112,7 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         foc_trip(FOC_TIMING); return;
     }
     if (foc.state == FOC_PRECHARGE || foc.state == FOC_RUN || foc.state == FOC_CALIBRATE) {
-        if (!isfinite(bus_voltage) || bus_voltage < 6.0f || bus_voltage > 14.0f) {
+        if (!isfinite(bus_voltage) || bus_voltage < FOC_BUS_MIN || bus_voltage > FOC_BUS_MAX) {
             foc_trip(FOC_BUS); return;
         }
     }
@@ -176,7 +176,6 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         float ud = 0.0942477796f * ed + integral_d - omega * 50e-6f * foc.iq;
         float uq = 0.0942477796f * eq + integral_q + omega * (50e-6f * foc.id + 0.0021f);
         float limit = bus_voltage * (((float)FOC_EDGE_LIMIT / 4200.0f - 0.5f) / 0.8660254038f);
-        if (limit > 4.8f) limit = 4.8f;
         float norm2 = ud * ud + uq * uq;
         float scale = norm2 > limit * limit ? limit / sqrtf(norm2) : 1.0f;
         foc.ud = ud * scale; foc.uq = uq * scale;

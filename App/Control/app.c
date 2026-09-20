@@ -158,7 +158,7 @@ bool app_command(const char *line)
     else {
         ok = foc.state == FOC_FAULT && bsp_uart_millis() - last_frame < 2u && isfinite(mt6835_angle_deg) &&
              isfinite(adc_sample.b_voltage) && isfinite(adc_sample.c_voltage) &&
-             isfinite(adc_sample.bus_voltage) && adc_sample.bus_voltage >= 6.0f && adc_sample.bus_voltage <= 14.0f &&
+             isfinite(adc_sample.bus_voltage) && adc_sample.bus_voltage >= FOC_BUS_MIN && adc_sample.bus_voltage <= FOC_BUS_MAX &&
              fabsf(foc.rpm) < 3000.0f &&
              (!foc.zero_ready || (fabsf(adc_sample.b_voltage - foc.b_offset) < 0.04f &&
               fabsf(adc_sample.c_voltage - foc.c_offset) < 0.04f &&
