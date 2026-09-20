@@ -13,11 +13,15 @@ static volatile uint8_t divider;
 static uint32_t sequence;
 #ifdef FOC_CAPTURE
 /* Debug build only; frozen before foreground export. No DMA reads this array. */
-typedef struct { uint32_t sequence; float b, c, bus, theta, alpha, beta; uint32_t flags; } capture_t;
-_Static_assert(sizeof(capture_t) == 32u, "capture wire layout");
+typedef struct {
+    uint32_t sequence;
+    uint16_t raw[3], counter, ccr[3], flags;
+    float mechanical, theta, id, iq;
+} capture_t;
+_Static_assert(sizeof(capture_t) == 36u, "capture wire layout");
 static capture_t capture[2048];
 static volatile unsigned capture_count;
-static volatile bool capturing, dumping;
+static volatile bool capturing, dumping, quiet, capture_low;
 static unsigned dump_index;
 #endif
 volatile uint32_t app_command_rejected;
@@ -53,6 +57,9 @@ void app_sample(void)
     if (previous_state == FOC_OFFSET && foc.state == FOC_PRECHARGE) bsp_motor_arm();
     unsigned mode = foc.state == FOC_PRECHARGE ? MOTOR_PRECHARGE :
         (foc.state == FOC_RUN || foc.state == FOC_CALIBRATE) ? MOTOR_PWM : MOTOR_OFF;
+#ifdef FOC_CAPTURE
+    if (capturing && capture_low && !foc.fault) mode = MOTOR_PRECHARGE;
+#endif
     if (mode == MOTOR_OFF) bsp_motor_off();
     else if (!foc_window(foc.duty) && mode == MOTOR_PWM) app_fault(FOC_WINDOW);
     else if (!bsp_motor_write(foc.duty, mode)) app_fault(FOC_TIMING);
@@ -60,12 +67,11 @@ void app_sample(void)
     sequence = (sequence + 1u) & 0xffffffu;
 #ifdef FOC_CAPTURE
     if (capturing) {
-        float bus = adc_sample.bus_voltage;
-        capture[capture_count++] = (capture_t){sequence, adc_sample.b_voltage, adc_sample.c_voltage,
-            bus, foc.electrical_deg,
-            sampled_mode == MOTOR_PWM ? bus * (2.0f * duty[0] - duty[1] - duty[2]) / 3.0f : 0.0f,
-            sampled_mode == MOTOR_PWM ? bus * (duty[1] - duty[2]) * 0.5773502692f : 0.0f,
-            foc.state | (foc.fault << 8) | (sampled_mode << 16) | ((uint32_t)valid << 24)};
+        capture[capture_count++] = (capture_t){sequence,
+            {adc_debug[0], adc_debug[1], adc_debug[2]}, adc_debug[3],
+            {(uint16_t)(duty[0]*4200.0f+0.5f), (uint16_t)(duty[1]*4200.0f+0.5f), (uint16_t)(duty[2]*4200.0f+0.5f)},
+            (uint16_t)(foc.state | (foc.fault << 3) | (sampled_mode << 7) | ((uint32_t)valid << 9)),
+            mt6835_angle_deg, foc.electrical_deg, foc.id, foc.iq};
         if (capture_count == 2048u || foc.fault) {
             capturing = false;
             key = bsp_motor_lock(); bsp_motor_off(); foc_stop(); bsp_motor_unlock(key);
@@ -76,7 +82,7 @@ void app_sample(void)
         divider = 0u;
         last_frame = bsp_uart_millis();
 #ifdef FOC_CAPTURE
-        if (!dumping)
+        if (!dumping && !quiet)
 #endif
         {
             /* New Ud/Uq are NEXT-period outputs, not this sample's applied voltage. */
@@ -84,6 +90,7 @@ void app_sample(void)
                 foc.ud, foc.uq, adc_sample.bus_voltage, adc_sample.b_voltage, adc_sample.c_voltage,
                 foc.electrical_deg, foc.rpm, (float)foc.state, (float)foc.fault, INFINITY};
             (void)bsp_uart_write(frame, sizeof frame);
+            bsp_uart_tick(); /* Fixed sample phase, after ADC and PWM submission. */
         }
     }
     bsp_motor_sample_end();
@@ -95,10 +102,19 @@ bool app_command(const char *line)
     enum { STOP, RUN, CAL, CLEAR } command;
     float amps = 0.0f;
 #ifdef FOC_CAPTURE
-    if (!strcmp(line, "capture")) {
+    if (!strcmp(line, "quiet 0") || !strcmp(line, "quiet 1")) {
+        quiet = line[6] == '1'; return true;
+    }
+    bool low = !strcmp(line, "capture low"), zero = !strcmp(line, "capture zero");
+    if (!strcmp(line, "capture") || low || zero) {
         uint32_t key = bsp_motor_lock();
         bool ok = !capturing && !dumping && foc.state != FOC_FAULT && foc.zero_ready;
-        if (ok) { capture_count = 0u; capturing = true; }
+        if (low || zero) ok = ok && foc.state == FOC_IDLE && fabsf(foc.rpm) < 5.0f;
+        if (ok && (low || zero)) {
+            ok = foc_current(0.01f);
+            if (ok) { foc.command = 0.0f; bsp_motor_arm(); }
+        }
+        if (ok) { capture_low = low; capture_count = 0u; capturing = true; }
         bsp_motor_unlock(key); return ok;
     }
     if (!strcmp(line, "dump")) {
@@ -131,7 +147,12 @@ bool app_command(const char *line)
     } else return false;
     uint32_t key = bsp_motor_lock();
     bool ok = true;
-    if (command == STOP) { bsp_motor_off(); foc_stop(); }
+    if (command == STOP) {
+#ifdef FOC_CAPTURE
+        capturing = capture_low = quiet = false;
+#endif
+        bsp_motor_off(); foc_stop();
+    }
     else if (command == RUN) ok = foc_current(amps);
     else if (command == CAL) ok = foc_calibrate();
     else {
@@ -186,19 +207,20 @@ void app_poll(void)
 #ifdef FOC_CAPTURE
     if (dumping) {
         /* At most one chunk/ms, below UART capacity. Normal telemetry is paused.
-           Header: FOC1 + little-endian record count, then exact 32-byte records. */
+           Header: FOC2 + little-endian record count, then exact 36-byte records. */
         static uint32_t sent_at;
         uint32_t now = bsp_uart_millis();
         if (now != sent_at) {
             sent_at = now;
             if (dump_index == 0u) {
-                uint32_t header[2] = {0x31434f46u, capture_count};
+                uint32_t header[2] = {0x32434f46u, capture_count};
                 if (bsp_uart_write(header, sizeof header)) dump_index = 1u;
             } else if (dump_index <= capture_count) {
                 unsigned count = capture_count - dump_index + 1u;
-                if (count > 4u) count = 4u;
+                if (count > 3u) count = 3u;
                 if (bsp_uart_write(&capture[dump_index - 1u], count * sizeof(capture_t))) dump_index += count;
             } else dumping = false;
+            bsp_uart_tick();
         }
     }
 #endif

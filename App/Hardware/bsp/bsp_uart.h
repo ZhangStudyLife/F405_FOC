@@ -19,8 +19,10 @@ bool bsp_uart_write(const void *data, size_t size);
 size_t bsp_uart_read(void *data, size_t size);
 uint32_t bsp_uart_millis(void);
 
-/* Board hooks: SysTick after HAL_IncTick, and USART2 IRQ respectively. */
+/* Start queued TX after acquisition/control (foreground for capture export).
+ * Never schedule normal telemetry from SysTick: its phase drifts across ADC. */
 void bsp_uart_tick(void);
+/* USART2 IRQ hook. */
 void bsp_uart_irq(void);
 
 #endif

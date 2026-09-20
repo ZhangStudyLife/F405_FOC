@@ -12,6 +12,9 @@ typedef struct {
    Foreground code must mask DMA2_Stream0 IRQ to read a coherent snapshot. */
 extern volatile bsp_adc_sample_t adc_sample;
 extern volatile uint32_t adc_errors;
+#ifdef FOC_CAPTURE
+extern volatile uint16_t adc_debug[4]; /* B/C/bus raw codes and ADC-read entry CNT, not hold time. */
+#endif
 
 void bsp_adc_start(void);
 void bsp_adc_stop(void);
