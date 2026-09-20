@@ -6,6 +6,8 @@ enum { MOTOR_OFF, MOTOR_PRECHARGE, MOTOR_PWM };
 extern volatile unsigned motor_mode; /* Latched at the PWM valley. */
 extern volatile float motor_duty[3]; /* Active at the last PWM valley. */
 extern volatile uint32_t motor_cycles, motor_period_min, motor_period_max, motor_work_max;
+/* Minimum CNT at CCR submission; timing fault low byte: write/update/period=1/2/3. */
+extern volatile uint32_t motor_write_min, motor_timing_fault;
 uint32_t bsp_motor_lock(void);
 void bsp_motor_unlock(uint32_t key);
 void bsp_motor_init(void);

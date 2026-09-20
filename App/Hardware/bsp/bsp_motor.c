@@ -14,6 +14,7 @@ static volatile bool ready, inhibited;
 static uint32_t sample_start, last_sample;
 volatile float motor_duty[3];
 volatile uint32_t motor_cycles, motor_period_min = UINT32_MAX, motor_period_max, motor_work_max;
+volatile uint32_t motor_write_min = 4200u, motor_timing_fault;
 
 void bsp_motor_arm(void) { inhibited = false; }
 
@@ -39,6 +40,7 @@ void bsp_motor_init(void)
     last_sample = 0u;
     motor_period_min = UINT32_MAX;
     motor_period_max = motor_work_max = motor_cycles = 0u;
+    motor_write_min = 4200u; motor_timing_fault = 0u;
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
     /* UG loads RCR=1 at CNT=0: overflow counts down, underflow latches CCRs.
@@ -62,7 +64,11 @@ void bsp_motor_init(void)
 bool bsp_motor_write(const float duty[3], unsigned mode)
 {
     /* All three preloads must be written before the next valley, never across it. */
-    if (inhibited || !(TIM8->CR1 & TIM_CR1_DIR) || TIM8->CNT < 600u) return false;
+    uint32_t counter = TIM8->CNT;
+    if (counter < motor_write_min) motor_write_min = counter;
+    if (inhibited || !(TIM8->CR1 & TIM_CR1_DIR) || counter < 600u) {
+        motor_timing_fault = 1u | (counter << 8); return false;
+    }
     TIM8->CCR1 = mode == MOTOR_PWM ? (uint32_t)(duty[0] * 4200.0f + 0.5f) : 0u;
     TIM8->CCR2 = mode == MOTOR_PWM ? (uint32_t)(duty[1] * 4200.0f + 0.5f) : 0u;
     TIM8->CCR3 = mode == MOTOR_PWM ? (uint32_t)(duty[2] * 4200.0f + 0.5f) : 0u;
@@ -76,6 +82,7 @@ bool bsp_motor_update(void)
     TIM8->SR = ~TIM_SR_UIF;
     if ((TIM8->CR1 & TIM_CR1_DIR) || TIM8->CNT > 600u ||
         (!ready && motor_mode != MOTOR_OFF)) {
+        motor_timing_fault = 2u | (TIM8->CNT << 8);
         bsp_motor_off(); return false;
     }
     /* A priority-0 fault may interrupt the priority-1 FOC write. Never let
@@ -115,6 +122,7 @@ bool bsp_motor_sample_begin(void)
     uint32_t now = DWT->CYCCNT;
     uint32_t period = now - last_sample;
     bool valid = !last_sample || (period >= 8000u && period <= 8800u);
+    if (!valid) motor_timing_fault = 3u | (period << 8);
     if (last_sample) {
         if (period < motor_period_min) motor_period_min = period;
         if (period > motor_period_max) motor_period_max = period;

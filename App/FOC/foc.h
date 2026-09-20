@@ -6,7 +6,7 @@
 
 #define FOC_BUS_MIN 8.0f
 #define FOC_BUS_MAX 36.0f
-#define FOC_SPEED_MAX 8600.0f /* 5010-KV360 documented mechanical limit, RPM. */
+#define FOC_SPEED_MAX 6000.0f /* Software overspeed trip, RPM. */
 
 /* Nominal timing, pending scope validation of ADC/driver/analog delays. */
 #ifndef FOC_TRIGGER_TICKS
@@ -33,7 +33,7 @@ typedef struct {
 extern foc_t foc; /* ISR-owned; foreground changes require a short IRQ critical section. */
 
 void foc_init(const foc_calibration_t *calibration);
-bool foc_current(float amps); /* +/-0.8 A torque, slew 1 A/s; zero does not start. */
+bool foc_current(float amps); /* +/-0.8 A torque, no reference ramp; zero does not start. */
 bool foc_calibrate(void);
 void foc_stop(void);
 void foc_trip(uint32_t fault);
@@ -41,7 +41,8 @@ void foc_trip(uint32_t fault);
    MT6835 internal measurement delay is not calibrated. */
 void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_voltage, float encoder_delay);
 float foc_wrap(float radians);
-void foc_modulate(float alpha, float beta, float bus_voltage, float duty[3]);
+/* Returns applied vector scale for PI anti-windup; shifts common mode for ADC. */
+float foc_modulate(float alpha, float beta, float bus_voltage, float duty[3]);
 bool foc_window(const float duty[3]);
 
 #endif

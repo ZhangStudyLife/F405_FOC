@@ -16,9 +16,9 @@ static uint32_t sequence;
 typedef struct {
     uint32_t sequence;
     uint16_t raw[3], counter, ccr[3], flags;
-    float mechanical, theta, id, iq;
+    float mechanical, theta, id, iq, reference, ud, uq;
 } capture_t;
-_Static_assert(sizeof(capture_t) == 36u, "capture wire layout");
+_Static_assert(sizeof(capture_t) == 48u, "capture wire layout");
 static capture_t capture[2048];
 static volatile unsigned capture_count;
 static volatile bool capturing, dumping, quiet, capture_low;
@@ -71,7 +71,7 @@ void app_sample(void)
             {adc_debug[0], adc_debug[1], adc_debug[2]}, adc_debug[3],
             {(uint16_t)(duty[0]*4200.0f+0.5f), (uint16_t)(duty[1]*4200.0f+0.5f), (uint16_t)(duty[2]*4200.0f+0.5f)},
             (uint16_t)(foc.state | (foc.fault << 3) | (sampled_mode << 7) | ((uint32_t)valid << 9)),
-            mt6835_angle_deg, foc.electrical_deg, foc.id, foc.iq};
+            mt6835_angle_deg, foc.electrical_deg, foc.id, foc.iq, foc.iq_ref, foc.ud, foc.uq};
         if (capture_count == 2048u || foc.fault) {
             capturing = false;
             key = bsp_motor_lock(); bsp_motor_off(); foc_stop(); bsp_motor_unlock(key);
@@ -207,13 +207,13 @@ void app_poll(void)
 #ifdef FOC_CAPTURE
     if (dumping) {
         /* At most one chunk/ms, below UART capacity. Normal telemetry is paused.
-           Header: FOC2 + little-endian record count, then exact 36-byte records. */
+           Header: FOC3 + little-endian record count, then exact 48-byte records. */
         static uint32_t sent_at;
         uint32_t now = bsp_uart_millis();
         if (now != sent_at) {
             sent_at = now;
             if (dump_index == 0u) {
-                uint32_t header[2] = {0x32434f46u, capture_count};
+                uint32_t header[2] = {0x33434f46u, capture_count};
                 if (bsp_uart_write(header, sizeof header)) dump_index = 1u;
             } else if (dump_index <= capture_count) {
                 unsigned count = capture_count - dump_index + 1u;

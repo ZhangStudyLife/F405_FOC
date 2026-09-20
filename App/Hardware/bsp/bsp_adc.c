@@ -40,7 +40,7 @@ void bsp_adc_start(void)
     DMA2_Stream0->NDTR = 2u;
     DMA2_Stream0->CR = DMA_SxCR_MINC | DMA_SxCR_CIRC | DMA_SxCR_PL_1 |
                       DMA_SxCR_MSIZE_1 | DMA_SxCR_PSIZE_1 |
-                      DMA_SxCR_TCIE | DMA_SxCR_TEIE | DMA_SxCR_DMEIE | DMA_SxCR_EN;
+                      DMA_SxCR_HTIE | DMA_SxCR_TEIE | DMA_SxCR_DMEIE | DMA_SxCR_EN;
     HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 1u, 0u);
     HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
     ADC2->CR2 = ADC_CR2_ADON;

@@ -61,7 +61,7 @@ void mt6835_start(void)
     DMA1_Stream0->NDTR = sizeof s_rx;
     DMA1_Stream5->NDTR = sizeof s_tx;
     /* CS is only a proxy for angle time; internal sensor latency is uncalibrated.
-       Timer down-count is guaranteed here by the ADC rank sequence. */
+       First-rank conversion finishes after the timer peak, before bus rank. */
     mt6835_sample_delay = (8400.0f - (float)TIM8->CNT - FOC_HOLD_TICKS) / 168e6f;
     GPIOA->BSRR = GPIO_PIN_0 << 16;
     DMA1_Stream0->CR |= DMA_SxCR_EN;

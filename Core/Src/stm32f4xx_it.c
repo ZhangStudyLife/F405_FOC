@@ -290,14 +290,20 @@ void USART2_IRQHandler(void)
 /* USER CODE BEGIN 1 */
 void DMA2_Stream0_IRQHandler(void)
 {
+    /* First pair ready: overlap encoder SPI with the second (bus) ADC rank. */
+    uint32_t flags = DMA2->LISR;
+    DMA2->LIFCR = DMA_LIFCR_CHTIF0;
+    if ((flags & (DMA_LISR_HTIF0 | DMA_LISR_TEIF0 | DMA_LISR_DMEIF0 | DMA_LISR_FEIF0)) != DMA_LISR_HTIF0) {
+        (void)bsp_adc_read(); app_fault(FOC_ADC); return;
+    }
     if (!bsp_motor_sample_begin()) app_fault(FOC_TIMING);
-    if (bsp_adc_read()) mt6835_start();
-    else app_fault(FOC_ADC);
+    mt6835_start();
 }
 
 void DMA1_Stream0_IRQHandler(void)
 {
     mt6835_finish();
+    if (!bsp_adc_read()) app_fault(FOC_ADC); /* Both ranks must now be complete. */
     app_sample();
 }
 

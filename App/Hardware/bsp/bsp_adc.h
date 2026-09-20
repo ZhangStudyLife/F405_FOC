@@ -9,7 +9,7 @@ typedef struct {
 } bsp_adc_sample_t;
 
 /* 20 kHz; nominal VDDA=3.3 V, shunt bias retained, no current calibration.
-   Foreground code must mask DMA2_Stream0 IRQ to read a coherent snapshot. */
+   Foreground code must briefly disable IRQs for a coherent snapshot. */
 extern volatile bsp_adc_sample_t adc_sample;
 extern volatile uint32_t adc_errors;
 #ifdef FOC_CAPTURE
@@ -18,6 +18,6 @@ extern volatile uint16_t adc_debug[4]; /* B/C/bus raw codes and ADC-read entry C
 
 void bsp_adc_start(void);
 void bsp_adc_stop(void);
-bool bsp_adc_read(void); /* DMA2 stream 0 / ADC overrun IRQ only. */
+bool bsp_adc_read(void); /* SPI RX completion after both ADC ranks, or ADC/DMA error IRQ. */
 
 #endif
