@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-extern volatile float mt6835_angle_deg;
+extern volatile float mt6835_angle_deg, mt6835_sample_delay;
 extern volatile uint32_t mt6835_errors;
 
 /* Fixed board: SPI3 mode 3 / 10.5 MHz, PA0 CS, DMA1 streams 0/5 channel 0. */

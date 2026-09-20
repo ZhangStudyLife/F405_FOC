@@ -1,11 +1,12 @@
 #include "mt6835_port_stm32.h"
 #include "mt6835.h"
+#include "foc.h"
 #include "spi.h"
 #include <math.h>
 
 static const uint8_t s_tx[6] = {0xa0, 0x03, 0, 0, 0, 0};
 static uint8_t s_rx[6];
-volatile float mt6835_angle_deg = NAN;
+volatile float mt6835_angle_deg = NAN, mt6835_sample_delay;
 volatile uint32_t mt6835_errors;
 
 /* Initialization only: register 0x001 is user RAM, not a device ID. */
@@ -59,6 +60,9 @@ void mt6835_start(void)
     DMA1->HIFCR = 0xf40u;     /* Stream 5 only; UART uses stream 6. */
     DMA1_Stream0->NDTR = sizeof s_rx;
     DMA1_Stream5->NDTR = sizeof s_tx;
+    /* CS is only a proxy for angle time; internal sensor latency is uncalibrated.
+       Timer down-count is guaranteed here by the ADC rank sequence. */
+    mt6835_sample_delay = (8400.0f - (float)TIM8->CNT - FOC_HOLD_TICKS) / 168e6f;
     GPIOA->BSRR = GPIO_PIN_0 << 16;
     DMA1_Stream0->CR |= DMA_SxCR_EN;
     DMA1_Stream5->CR |= DMA_SxCR_EN;

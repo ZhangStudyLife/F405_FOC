@@ -26,6 +26,10 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     App/Hardware/mt6835
     App/Protocols/JustFloat
 )
+option(FOC_CAPTURE "2048-sample current capture (separate debug build)" OFF)
+if(FOC_CAPTURE)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE FOC_CAPTURE)
+endif()
 target_link_libraries(${CMAKE_PROJECT_NAME} stm32cubemx m)
 # Optimize the sampling/telemetry path for CPU time, leave HAL at -Os.
 set_source_files_properties(

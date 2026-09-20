@@ -12,7 +12,7 @@ extern volatile bsp_uart_stats_t g_uart_stats;
 
 /* Call once after MX_USART2_UART_Init. No other code may use huart2 TX/RX. */
 bool bsp_uart_init(void);
-/* Copies the complete message or returns false immediately; maximum 128 bytes.
+/* Copies the complete message or returns false immediately; maximum 256 bytes.
  * true means queued, not delivered. DMA errors are counted; no automatic replay.
  * Call from thread/ordinary IRQ context, not NMI. read() has one consumer. */
 bool bsp_uart_write(const void *data, size_t size);

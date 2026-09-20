@@ -2,7 +2,7 @@
 #include "usart.h"
 #include <string.h>
 
-static uint8_t s_tx[2][128];
+static uint8_t s_tx[2][256];
 static uint8_t s_rx[128];
 static volatile uint16_t s_used;
 static volatile uint8_t s_fill, s_busy;

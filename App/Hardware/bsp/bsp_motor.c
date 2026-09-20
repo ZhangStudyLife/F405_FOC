@@ -8,7 +8,8 @@ uint32_t bsp_motor_lock(void) { uint32_t key = __get_PRIMASK(); __disable_irq();
 void bsp_motor_unlock(uint32_t key) { __set_PRIMASK(key); }
 
 #define GATE_CHANNELS (TIM_CCER_CC1E | TIM_CCER_CC1NE | TIM_CCER_CC2E | TIM_CCER_CC2NE | TIM_CCER_CC3E | TIM_CCER_CC3NE)
-static volatile unsigned pending_mode, active_mode;
+static volatile unsigned pending_mode;
+volatile unsigned motor_mode;
 static volatile bool ready, inhibited;
 static uint32_t sample_start, last_sample;
 volatile float motor_duty[3];
@@ -26,7 +27,7 @@ void bsp_motor_off(void)
     GPIOA->MODER = (GPIOA->MODER & ~(3u << 14)) | (1u << 14);
     GPIOB->MODER = (GPIOB->MODER & ~15u) | 5u;
     GPIOC->MODER = (GPIOC->MODER & ~(63u << 12)) | (21u << 12);
-    active_mode = pending_mode = MOTOR_OFF;
+    motor_mode = pending_mode = MOTOR_OFF;
     for (unsigned i = 0; i < 3; ++i) motor_duty[i] = 0.0f;
 }
 
@@ -36,6 +37,8 @@ void bsp_motor_init(void)
     ready = false;
     inhibited = false; /* Initial sampling starts with gates disconnected. */
     last_sample = 0u;
+    motor_period_min = UINT32_MAX;
+    motor_period_max = motor_work_max = motor_cycles = 0u;
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
     /* UG loads RCR=1 at CNT=0: overflow counts down, underflow latches CCRs.
@@ -45,7 +48,7 @@ void bsp_motor_init(void)
     TIM8->CCMR1 = TIM_CCMR1_OC1PE | TIM_CCMR1_OC2PE | (6u << 4) | (6u << 12);
     TIM8->CCMR2 = TIM_CCMR2_OC3PE | (6u << 4) | (4u << 12);
     TIM8->CCR1 = TIM8->CCR2 = TIM8->CCR3 = 2100u;
-    TIM8->CCR4 = 4100u;
+    TIM8->CCR4 = FOC_TRIGGER_TICKS;
     TIM8->BDTR = 84u; /* 84 / 168 MHz = 500 ns. No automatic restart. */
     TIM8->CNT = 0u; TIM8->EGR = TIM_EGR_UG;
     TIM8->CCMR2 = TIM_CCMR2_OC3PE | (6u << 4) | (3u << 12);
@@ -72,14 +75,14 @@ bool bsp_motor_update(void)
 {
     TIM8->SR = ~TIM_SR_UIF;
     if ((TIM8->CR1 & TIM_CR1_DIR) || TIM8->CNT > 600u ||
-        (!ready && active_mode != MOTOR_OFF)) {
+        (!ready && motor_mode != MOTOR_OFF)) {
         bsp_motor_off(); return false;
     }
     /* A priority-0 fault may interrupt the priority-1 FOC write. Never let
        its resumed/stale preload re-enable gates after an emergency stop. */
     if (inhibited) { ready = false; return true; }
     if (ready) {
-        if (pending_mode != active_mode) {
+        if (pending_mode != motor_mode) {
             unsigned mode = pending_mode;
             if (mode == MOTOR_OFF) bsp_motor_off();
             else if (mode == MOTOR_PRECHARGE) {
@@ -96,12 +99,12 @@ bool bsp_motor_update(void)
                 GPIOB->MODER = (GPIOB->MODER & ~15u) | 10u;
                 GPIOC->MODER = (GPIOC->MODER & ~(63u << 12)) | (42u << 12);
             }
-            active_mode = mode;
+            motor_mode = mode;
         }
         /* Report quantized CCR/ARR, not the unrounded floating command. */
-        motor_duty[0] = active_mode == MOTOR_PWM ? (float)TIM8->CCR1 / 4200.0f : 0.0f;
-        motor_duty[1] = active_mode == MOTOR_PWM ? (float)TIM8->CCR2 / 4200.0f : 0.0f;
-        motor_duty[2] = active_mode == MOTOR_PWM ? (float)TIM8->CCR3 / 4200.0f : 0.0f;
+        motor_duty[0] = motor_mode == MOTOR_PWM ? (float)TIM8->CCR1 / 4200.0f : 0.0f;
+        motor_duty[1] = motor_mode == MOTOR_PWM ? (float)TIM8->CCR2 / 4200.0f : 0.0f;
+        motor_duty[2] = motor_mode == MOTOR_PWM ? (float)TIM8->CCR3 / 4200.0f : 0.0f;
     }
     ready = false;
     return true;
@@ -137,7 +140,7 @@ bool bsp_motor_load(foc_calibration_t *calibration)
 
 bool bsp_motor_save(const foc_calibration_t *calibration)
 {
-    if (active_mode != MOTOR_OFF || (TIM8->CR1 & TIM_CR1_CEN)) return false;
+    if (motor_mode != MOTOR_OFF || (TIM8->CR1 & TIM_CR1_CEN)) return false;
     record_t r = {.version = 1u, .poles = 7u, .cal = *calibration, .magic = 0x464f4331u};
     r.checksum = checksum(&r);
     FLASH_EraseInitTypeDef erase = {.TypeErase = FLASH_TYPEERASE_SECTORS,

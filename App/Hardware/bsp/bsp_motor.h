@@ -3,6 +3,7 @@
 
 #include "foc.h"
 enum { MOTOR_OFF, MOTOR_PRECHARGE, MOTOR_PWM };
+extern volatile unsigned motor_mode; /* Latched at the PWM valley. */
 extern volatile float motor_duty[3]; /* Active at the last PWM valley. */
 extern volatile uint32_t motor_cycles, motor_period_min, motor_period_max, motor_work_max;
 uint32_t bsp_motor_lock(void);
