@@ -15,6 +15,8 @@ bool bsp_uart_init(void)
     huart2.Init.OverSampling = UART_OVERSAMPLING_8;
     if (HAL_UART_Init(&huart2) != HAL_OK) return false;
     __HAL_UART_CLEAR_OREFLAG(&huart2);
+    /* At 2 Mbps a byte arrives every 5 us. RX must preempt FOC arithmetic. */
+    HAL_NVIC_SetPriority(USART2_IRQn, 0u, 0u);
     USART2->CR1 |= USART_CR1_RXNEIE;
     return true;
 }

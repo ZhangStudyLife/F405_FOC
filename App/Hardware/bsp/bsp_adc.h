@@ -14,6 +14,7 @@ extern volatile bsp_adc_sample_t adc_sample;
 extern volatile uint32_t adc_errors;
 
 void bsp_adc_start(void);
+void bsp_adc_stop(void);
 bool bsp_adc_read(void); /* DMA2 stream 0 / ADC overrun IRQ only. */
 
 #endif

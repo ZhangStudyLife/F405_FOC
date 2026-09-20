@@ -42,7 +42,7 @@ bool mt6835_init(void)
     (void)SPI3->SR;
     SPI3->CR1 |= SPI_CR1_SPE;
     SPI3->CR2 = SPI_CR2_RXDMAEN | SPI_CR2_TXDMAEN;
-    HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0u, 0u);
+    HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 1u, 0u);
     HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
     return true;
 }
@@ -83,4 +83,17 @@ void mt6835_finish(void)
         mt6835_angle_deg = mt6835_decode(s_rx);
     }
     if (isnan(mt6835_angle_deg)) mt6835_errors++;
+}
+
+void mt6835_stop(void)
+{
+    DMA1_Stream0->CR &= ~DMA_SxCR_EN;
+    DMA1_Stream5->CR &= ~DMA_SxCR_EN;
+    while ((DMA1_Stream0->CR | DMA1_Stream5->CR) & DMA_SxCR_EN) {}
+    SPI3->CR1 &= ~SPI_CR1_SPE;
+    (void)SPI3->DR; (void)SPI3->SR;
+    GPIOA->BSRR = GPIO_PIN_0;
+    DMA1->LIFCR = 0x3du; DMA1->HIFCR = 0xf40u;
+    HAL_NVIC_ClearPendingIRQ(DMA1_Stream0_IRQn);
+    SPI3->CR1 |= SPI_CR1_SPE;
 }

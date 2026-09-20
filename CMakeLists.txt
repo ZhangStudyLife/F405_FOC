@@ -11,6 +11,8 @@ add_executable(${CMAKE_PROJECT_NAME})
 add_subdirectory(cmake/stm32cubemx)
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/Control/app.c
+    App/FOC/foc.c
+    App/Hardware/bsp/bsp_motor.c
     App/Hardware/bsp/bsp_adc.c
     App/Hardware/bsp/bsp_can.c
     App/Hardware/bsp/bsp_uart.c
@@ -19,13 +21,15 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 )
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     App/Control
+    App/FOC
     App/Hardware/bsp
     App/Hardware/mt6835
     App/Protocols/JustFloat
 )
-target_link_libraries(${CMAKE_PROJECT_NAME} stm32cubemx)
+target_link_libraries(${CMAKE_PROJECT_NAME} stm32cubemx m)
 # Optimize the sampling/telemetry path for CPU time, leave HAL at -Os.
 set_source_files_properties(
+    App/FOC/foc.c App/Hardware/bsp/bsp_motor.c
     App/Control/app.c App/Hardware/bsp/bsp_adc.c App/Hardware/bsp/bsp_uart.c
     App/Hardware/mt6835/mt6835.c App/Hardware/mt6835/mt6835_port_stm32.c
     PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-O3>")

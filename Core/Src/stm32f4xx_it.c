@@ -22,6 +22,7 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "bsp_motor.h"
 #include "app.h"
 #include "bsp_adc.h"
 #include "mt6835_port_stm32.h"
@@ -77,6 +78,7 @@ extern UART_HandleTypeDef huart2;
 void NMI_Handler(void)
 {
   /* USER CODE BEGIN NonMaskableInt_IRQn 0 */
+  bsp_motor_off();
 
   /* USER CODE END NonMaskableInt_IRQn 0 */
   /* USER CODE BEGIN NonMaskableInt_IRQn 1 */
@@ -92,6 +94,7 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
+  bsp_motor_off();
 
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
@@ -107,6 +110,7 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
+  bsp_motor_off();
 
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
@@ -122,6 +126,7 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
+  bsp_motor_off();
 
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
@@ -137,6 +142,7 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
+  bsp_motor_off();
 
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
@@ -227,7 +233,8 @@ void DMA1_Stream6_IRQHandler(void)
 void ADC_IRQHandler(void)
 {
   /* USER CODE BEGIN ADC_IRQn 0 */
-  (void)bsp_adc_read(); /* Overrun: stop acquisition and invalidate voltages. */
+  app_fault(FOC_ADC);
+  (void)bsp_adc_read();
   return;
   /* USER CODE END ADC_IRQn 0 */
   HAL_ADC_IRQHandler(&hadc1);
@@ -284,13 +291,20 @@ void USART2_IRQHandler(void)
 /* USER CODE BEGIN 1 */
 void DMA2_Stream0_IRQHandler(void)
 {
+    if (!bsp_motor_sample_begin()) app_fault(FOC_TIMING);
     if (bsp_adc_read()) mt6835_start();
+    else app_fault(FOC_ADC);
 }
 
 void DMA1_Stream0_IRQHandler(void)
 {
     mt6835_finish();
     app_sample();
+}
+
+void TIM8_UP_TIM13_IRQHandler(void)
+{
+    if (!bsp_motor_update()) app_fault(FOC_TIMING);
 }
 
 /* USER CODE END 1 */
