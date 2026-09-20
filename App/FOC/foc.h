@@ -26,7 +26,7 @@ typedef struct {
 extern foc_t foc; /* ISR-owned; foreground changes require a short IRQ critical section. */
 
 void foc_init(const foc_calibration_t *calibration);
-bool foc_current(float amps); /* +/-0.5 A torque, slew 1 A/s; zero does not start. */
+bool foc_current(float amps); /* +/-0.8 A torque, slew 1 A/s; zero does not start. */
 bool foc_calibrate(void);
 void foc_stop(void);
 void foc_trip(uint32_t fault);
