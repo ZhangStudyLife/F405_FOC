@@ -5,7 +5,8 @@
 #include <stdint.h>
 
 #define FOC_BUS_MIN 8.0f
-#define FOC_BUS_MAX 28.0f /* 24 V nominal; stop on regenerative overvoltage. */
+#define FOC_BUS_MAX 36.0f
+#define FOC_SPEED_MAX 8600.0f /* 5010-KV360 documented mechanical limit, RPM. */
 
 /* Nominal timing, pending scope validation of ADC/driver/analog delays. */
 #ifndef FOC_TRIGGER_TICKS

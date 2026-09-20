@@ -160,7 +160,7 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
     if (foc.state == FOC_PRECHARGE || foc.state == FOC_RUN || foc.state == FOC_CALIBRATE) {
         float trip = aligning ? 5.0f : 2.0f;
         if (fabsf(ia) >= trip || fabsf(ib) >= trip || fabsf(ic) >= trip) { foc_trip(FOC_CURRENT); return; }
-        if (!aligning && fabsf(foc.rpm) >= 3000.0f) { foc_trip(FOC_SPEED); return; }
+        if (!aligning && fabsf(foc.rpm) >= FOC_SPEED_MAX) { foc_trip(FOC_SPEED); return; }
     }
     if (foc.state == FOC_PRECHARGE) {
         if (++ticks < 40u) return; /* 2 ms, all three low sides on. */
@@ -181,10 +181,11 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         foc.ud = ud * scale; foc.uq = uq * scale;
         integral_d += 0.0113097336f * ed + 0.12f * (foc.ud - ud);
         integral_q += 0.0113097336f * eq + 0.12f * (foc.uq - uq);
-        /* Predict to next PWM centre (next valley + 25 us). At <=3000 RPM,
-           |advance|<.11 rad: polynomial rotation error <6e-6, one sin/cos pair. */
+        /* Predict to next PWM centre (next valley + 25 us). At <=8600 RPM,
+           |advance|<.32 rad: rotation error <2.9e-5, one sin/cos pair. */
         float advance = omega * ((12600.0f - FOC_HOLD_TICKS) / 168e6f);
-        float sa = advance * (1.0f - advance * advance / 6.0f), ca = 1.0f - advance * advance * 0.5f;
+        float a2 = advance * advance;
+        float sa = advance * (1.0f - a2 / 6.0f), ca = 1.0f - a2 * (0.5f - a2 / 24.0f);
         float so = s * ca + c * sa, co = c * ca - s * sa;
         foc_modulate(foc.ud * co - foc.uq * so, foc.ud * so + foc.uq * co, bus_voltage, foc.duty);
     } else if (foc.state == FOC_CALIBRATE) {
