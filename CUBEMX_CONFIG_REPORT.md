@@ -328,7 +328,7 @@ DT = DTG[7:0] × tDTS = 84 / 168 MHz = 500 ns
 
 RM0090 ADC_CR2.JEXTSEL[3:0] 明确规定 **1110=Timer 8 CC4 event**，CubeMX F405 可选项及 HAL 宏 `ADC_EXTERNALTRIGINJECCONV_T8_CC4` 一致。F405 injected 不应改成并不存在于其该选择表中的 TIM8_TRGO。本项目可直接采用 CC4，无需第二个定时器桥接。
 
-TIM8_CH4 timing compare，CCR4=4100；Center-Aligned Mode 1 的输出比较事件在向下计数方向产生，因此每完整 PWM 周期对应一次采样事件，标称 20 kHz。未开启 CC4 或 TIM8 Update 中断。以从 CNT=0 向上开始计算，首次向下匹配位于 `(2×4200−4100)/168 MHz≈25.595 µs`。
+TIM8_CH4 Toggle，CCR4=4100；OCREF 在上下计数匹配时翻转，ADC 只取上升沿，每完整 PWM 周期采样一次，标称 20 kHz。Center-Aligned Mode 1 对 CC 中断标志的方向限制不能等同于 OCREF 翻转方向。未开启 CC4 或 TIM8 Update 中断。2026-09-20 复位启动的 TIM8 相位实测确认上升沿对应向上匹配，首次约 `4100/168 MHz≈24.405 µs`；测量方法见 tests/ADC_TEST.md。
 
 这是可调整的初始低侧电流采样时刻，接近计数器顶部的 PWM1 低侧零矢量区。后续 SVPWM 必须保证 B/C 两个低侧开关在采样窗内都稳定导通，并为死区、运放建立时间和整个 ADC 采样窗留出余量；高调制度时需要限制占空比或调整 CCR4。固定触发配置本身不保证所有占空比下的双分流可观测性。
 

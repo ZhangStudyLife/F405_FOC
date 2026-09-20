@@ -1,13 +1,14 @@
 #include "adc_test.h"
 #include "bsp_adc.h"
 #include "bsp_time.h"
+#include "justfloat.h"
 #include "stm32f4xx_hal.h"
 
-/* SWD observation only; no commands can enable power outputs. */
+/* Sampling diagnostics; no commands can enable power outputs. */
 volatile struct {
     uint32_t started;
     uint32_t samples;
-    uint32_t raw[4];                 /* PC3, PC2, PA4, PA6 */
+    uint32_t tx_rejected;
     uint32_t period_min_cycles;
     uint32_t period_max_cycles;
     uint32_t isr_max_cycles;
@@ -33,6 +34,11 @@ void adc_test_init(void)
     HAL_GPIO_Init(GPIOC, &gpio);
     TIM8->BDTR &= ~TIM_BDTR_MOE;
     TIM8->CCER = TIM_CCER_CC4E;
+    TIM8->PSC = 0u; /* Center-aligned: 168 MHz / (2 * 4200) = 20 kHz, 50 us. */
+    /* CCR4=4100 is a bring-up trigger, not a validated running-current window.
+       FOC must keep B/C low sides conducting throughout the sampling aperture,
+       after dead time and switching/amplifier settling; otherwise adjust PWM
+       or the trigger. All six gate pins remain low in this test. */
     TIM8->CNT = 0u;
     TIM8->EGR = TIM_EGR_UG;
     TIM8->SR = 0u;
@@ -49,8 +55,7 @@ void adc_test_init(void)
 void adc_test_isr(void)
 {
     uint32_t start = DWT->CYCCNT;
-    bsp_adc_frame_t frame;
-    if (!bsp_adc_read(&frame)) {
+    if (!bsp_adc_read()) {
         g_adc_test.incomplete_pairs++;
         bsp_adc_stop();
         TIM8->CR1 &= ~TIM_CR1_CEN;
@@ -62,11 +67,10 @@ void adc_test_isr(void)
         if (period < g_adc_test.period_min_cycles) g_adc_test.period_min_cycles = period;
         if (period > g_adc_test.period_max_cycles) g_adc_test.period_max_cycles = period;
     }
-    g_adc_test.raw[0] = frame.m[0];
-    g_adc_test.raw[1] = frame.s[0];
-    g_adc_test.raw[2] = frame.m[1];
-    g_adc_test.raw[3] = frame.s[1];
     g_adc_test.samples++;
+    /* Only telemetry is decimated to 1 kHz; all voltages update at 20 kHz. */
+    if (g_adc_test.samples % 20u == 0u &&
+        !justfloat_send(adc_m1.b_voltage, adc_m1.c_voltage, adc_bus_voltage)) g_adc_test.tx_rejected++;
     uint32_t elapsed = DWT->CYCCNT - start;
     if (elapsed > g_adc_test.isr_max_cycles) g_adc_test.isr_max_cycles = elapsed;
 }
