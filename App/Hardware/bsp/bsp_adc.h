@@ -1,24 +1,19 @@
-#ifndef APP_HARDWARE_BSP_BSP_ADC_H
-#define APP_HARDWARE_BSP_BSP_ADC_H
+#ifndef APP_HARDWARE_BSP_ADC_H
+#define APP_HARDWARE_BSP_ADC_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 typedef struct {
-    float b_voltage; /* V: PC3 / ADC1_IN13 / M1_SO1, B-phase shunt amplifier. */
-    float c_voltage; /* V: PC2 / ADC2_IN12 / M1_SO2, C-phase shunt amplifier. */
-} bsp_adc_m1_t;
+    float b_voltage, c_voltage, bus_voltage;
+} bsp_adc_sample_t;
 
-/* ADC pin voltages including bias, using nominal VDDA=3.3 V; no current conversion.
-   Updated together in the ADC ISR at 20 kHz. Foreground coherent reads must
-   briefly mask the ADC IRQ; volatile alone does not make the pair atomic. */
-extern volatile bsp_adc_m1_t adc_m1;
-/* V: DCBUS via PA6 / VBUS_S, 39k / 2.2k divider; updated at 20 kHz. */
-extern volatile float adc_bus_voltage;
+/* 20 kHz; nominal VDDA=3.3 V, shunt bias retained, no current calibration.
+   Foreground code must mask DMA2_Stream0 IRQ to read a coherent snapshot. */
+extern volatile bsp_adc_sample_t adc_sample;
+extern volatile uint32_t adc_errors;
 
-/* Call after MX_ADC1/2_Init with TIM8 stopped. */
-bool bsp_adc_start(void);
-void bsp_adc_stop(void);
-/* ADC ISR only: publish all voltages, or return false without updating any. */
-bool bsp_adc_read(void);
+void bsp_adc_start(void);
+bool bsp_adc_read(void); /* DMA2 stream 0 / ADC overrun IRQ only. */
 
 #endif

@@ -1,44 +1,47 @@
-# tests —— 宿主机单元测试
+# 当前验证记录
 
-这些测试**不参与固件构建**（CMake 里没有引用），用宿主机的 gcc 编译运行。
-能这么做的前提是 `mt6835.c` 零 HAL 依赖 —— 它只依赖 `mt6835_port_t` 里的
-函数指针，测试用一个假 port 就能把它跑起来。这正是分层设计换来的好处。
+2026-09-20，STM32F405、168 MHz，ST-Link 8600A1002031363534313541。此文件替代旧 ADC/UART/编码器测试说明；历史内容可在 Git 历史和本机 `build/refactor/before.zip` 中查阅。
 
-## 跑法
+## 可重复的主机测试
 
-```bash
-DRV=../App/Hardware/mt6835          # 相对于 tests/
-gcc -std=c11 -Wall -Wextra -O2 -I $DRV test_mt6835_crc.c   $DRV/mt6835.c -lm -o t1 && ./t1
-gcc -std=c11 -Wall -Wextra -O2 -I $DRV test_mt6835_speed.c $DRV/mt6835.c -lm -o t2 && ./t2
+在工程根目录运行：
+
+```sh
+gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Hardware/mt6835 tests/test_mt6835_crc.c App/Hardware/mt6835/mt6835.c -lm -o build/test_mt6835_crc.exe
+./build/test_mt6835_crc.exe
+gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Protocols/JustFloat -I App/Hardware/bsp tests/test_justfloat.c -o build/test_justfloat.exe
+./build/test_justfloat.exe
 ```
 
-Windows / PowerShell 下把路径换成反斜杠即可，gcc 用 `C:\msys64\mingw64\bin\gcc.exe`。
+均通过。编码器测试覆盖边界角度、独立逐位 CRC 参考、数据/CRC 任意单比特损坏、所有传感器故障状态、历史真实采样帧。JustFloat 覆盖精确帧字节、单次求值、16 通道上限、NaN 和发送拒绝。
 
-## test_mt6835_crc.c —— 协议与 CRC
+## 构建和最终固件
 
-- CRC-8 已知值（含手算校验的两个边界）
-- 与逐字节独立参考实现做**穷举交叉验证**（211 个角度 × 8 个状态）
-- 突发帧解包：角度 / 状态 / CRC 是否落在协议规定的字节位置
-- 边界值：全 1、全 0
-- 另外用**芯片真实吐出的帧**（raw=518786/518792/518806 → CRC=142/57/231）验证，
-  这是最硬的一条证据：本驱动的 CRC 与真实芯片逐位一致
+- Debug / Release 编译通过；最终 Release 已烧录、回读校验并运行。
+- App 手写 C/H 从 20 文件、3173 行缩减；删除测试入口、通用包装和未使用功能，不裁剪 HAL/CMSIS。
+- Release Flash（text+data）16888 → 14940 bytes；BSS 4808 → 2792 bytes。
+- 最终固件 COM14、2 Mbps 连续 30 秒获得 30001 个有效位置帧，所有相邻时间戳均差 1 ms，1000 Hz；无内部错帧、NaN 或越界角度。
+- ADC 错误、编码器错误、UART 拒绝/DMA/RX 错误均为 0。ADC 静态电压约 B=1.662 V、C=1.681 V、母线=4.527 V；只是数字链路检查，不是精度校准。
+- SWD 确认 TIM8 PSC=0、ARR=4200、CCR4=4100、CCER 仅 CH4；六路栅极引脚均为 GPIO 推挽低。未用示波器测实际栅极电压。
 
-## test_mt6835_speed.c —— 测速算法
+## 临时插桩实测（最终固件已移除）
 
-板子上电机轴是静止的，实测速度恒为 0，验证不了任何东西。
-这里用假 port 造出"以已知角速度旋转"的合成数据流，确定性地验证：
+在 Release 两个 DMA 中断内使用 DWT 测量调用区间，前台不休眠。持续窗口内 ADC 约 158 万次，ADC/编码器错误均为 0。
 
-| 用例 | 检查什么 |
+| 项目 | 测量结果 |
 |---|---|
-| 匀速正转 | 速度值 == 理论值（100 counts/样本 @20 kHz → 5.992 rad/s） |
-| 反转 | 符号正确 |
-| **过零** | 角度从 `0x1FFFFF` 回绕到 0 时不产生假速度尖峰 |
-| 静止 | 恒为 0 |
-| `dir_invert` | 速度符号跟着翻 |
-| 一阶低通 | 收敛到稳态值 |
-| `set_speed_filter_hz` | α 计算公式正确 |
+| ADC DMA 完成周期 | 8391～8409 cycles，即 49.946～50.054 us |
+| ADC 发布 + SPI DMA 启动 | 初次窗口平均约 0.72 us；各窗口最大 155 cycles（0.923 us） |
+| SPI DMA 完成 + 解码 + 20 分频上传 | 初次窗口平均约 1.10 us；各窗口最大 415 cycles（2.470 us） |
+| 两段测量区间最大值之和 | 570 cycles（3.393 us） |
+| ADC IRQ 入口至编码器处理完成 | 最大 1453 cycles（8.649 us），包含 DMA 线上传输 |
 
-> **过零那条是最关键的**。测速必须基于**多圈展开后**的计数增量：
-> 如果直接用原始值相减，跨过 0 的那一拍会算出"半圈 / 50 µs" ≈ 6×10⁴ rad/s
-> 的荒唐值，送进速度环就是一次剧烈冲击。测试里断言"全程最大 |速度| == 理论值"，
-> 就是专门盯着这个。
+此前固件 ADC ISR 最大测量区间为 1933 cycles（11.506 us），含 SPI DMA 忙等。新路径不再等待 SPI。上述区间不含完整异常进出栈、函数序言/尾声、所有统计指令及 UART/CAN 中断；不能当作精确全系统 CPU 占用，也不宣称是所有实现中绝对最低开销。
+
+## 通信测试
+
+临时固件 CAN 静默回环验证：20 帧入队后保留前 15 帧、丢弃计数 5；顺序/内容正确；标准、扩展和远程帧通过；非法 DLC/ID 拒绝。测试后恢复 NORMAL，最终固件不含回环和自测。未验证外部 CAN 收发器及总线 ACK。
+
+临时固件串口回显验证：2 Mbps 下 76 字节从上位机发出、MCU 接收并完整回传，相关错误计数为 0。3.5 Mbps 同样测试产生 76 次 RX 错误，因此最终使用 2 Mbps。没有进行持续满速双工验收，应用最终不自动回显。
+
+本机原始记录在 `build/refactor/`：重构前备份、临时插桩源、板上寄存器快照、最终串口 JSON。测试统计/回显/CAN 自测均不进入最终固件；保留两个独立主机测试用于回归。

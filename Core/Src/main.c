@@ -28,10 +28,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "bsp_time.h"
-#include "adc_test.h"
-#include "bsp_can.h"
-#include "bsp_uart.h"
+#include "app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -52,14 +49,6 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-/* CAN1 总线实例。外设本身（含 1 Mbps 位时序）由 MX_CAN1_Init() 配好，
-   这里只负责在 main 里挂上过滤器、打开 RX 中断并启动。 */
-bsp_can_t g_can1;
-
-/* 上电自检结果，供调试器（hotplug 读内存）查看，不必反复烧录就能判断:
-     [0] selftest 是否通过（1=通过）   [1] rx_total   [2] tx_total   [3] rx_lost
-   回环自测不经过收发器和线缆，只证明 过滤器→中断→队列→出队 这条软件链路。 */
-volatile uint32_t g_can_selftest_out[4];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -110,26 +99,7 @@ int main(void)
   MX_USART2_UART_Init();
   MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
-  bsp_time_init();
-  if (!bsp_uart_init(3500000u)) Error_Handler();
-  adc_test_init();
-
-  /* CAN1：配置"全通过"过滤器 → 打开 RX FIFO0 中断通知 → Start。
-     波特率 1 Mbps（APB1 42 MHz / Prescaler 3 / BS1 8TQ / BS2 5TQ），
-     由 CubeMX 生成的 MX_CAN1_Init() 设定，本调用不改位时序。
-     接好 CAN_H/CAN_L、两端各一个 120Ω 后即可与上位机收发。 */
-  (void)bsp_can_init(&g_can1, &hcan1);
-
-  /* 上电跑一次回环自测（不需要第二个节点、不需要接线）。
-     它验证 过滤器→中断→队列→出队，结果留在 g_can_selftest_out。
-     测完自动切回 NORMAL，不影响后续正常收发。 */
-  {
-    bsp_can_frame_t echo;
-    g_can_selftest_out[0] = bsp_can_selftest(&g_can1, &echo) ? 1u : 0u;
-    g_can_selftest_out[1] = bsp_can_rx_count(&g_can1);
-    g_can_selftest_out[2] = bsp_can_tx_count(&g_can1);
-    g_can_selftest_out[3] = bsp_can_rx_lost(&g_can1);
-  }
+  if (!app_init()) Error_Handler();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -139,6 +109,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    __WFI();
   }
   /* USER CODE END 3 */
 }

@@ -22,7 +22,9 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "adc_test.h"
+#include "app.h"
+#include "bsp_adc.h"
+#include "mt6835_port_stm32.h"
 #include "bsp_uart.h"
 /* USER CODE END Includes */
 
@@ -225,8 +227,8 @@ void DMA1_Stream6_IRQHandler(void)
 void ADC_IRQHandler(void)
 {
   /* USER CODE BEGIN ADC_IRQn 0 */
-  adc_test_isr();
-  return; /* Injected IRQ is acknowledged by bsp_adc_read; no second HAL dispatch. */
+  (void)bsp_adc_read(); /* Overrun: stop acquisition and invalidate voltages. */
+  return;
   /* USER CODE END ADC_IRQn 0 */
   HAL_ADC_IRQHandler(&hadc1);
   HAL_ADC_IRQHandler(&hadc2);
@@ -280,5 +282,15 @@ void USART2_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+void DMA2_Stream0_IRQHandler(void)
+{
+    if (bsp_adc_read()) mt6835_start();
+}
+
+void DMA1_Stream0_IRQHandler(void)
+{
+    mt6835_finish();
+    app_sample();
+}
 
 /* USER CODE END 1 */

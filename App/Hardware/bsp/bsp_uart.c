@@ -2,20 +2,18 @@
 #include "usart.h"
 #include <string.h>
 
-static uint8_t s_tx[2][1024];
+static uint8_t s_tx[2][128];
 static uint8_t s_rx[128];
 static volatile uint16_t s_used;
-static volatile uint8_t s_fill, s_busy, s_ready;
+static volatile uint8_t s_fill, s_busy;
 static volatile uint8_t s_rx_head, s_rx_tail;
 volatile bsp_uart_stats_t g_uart_stats;
 
-bool bsp_uart_init(uint32_t baud)
+bool bsp_uart_init(void)
 {
-    if (baud == 0u || baud > HAL_RCC_GetPCLK1Freq() / 8u || s_busy || s_used) return false;
-    huart2.Init.BaudRate = baud;
+    huart2.Init.BaudRate = 2000000u;
     huart2.Init.OverSampling = UART_OVERSAMPLING_8;
     if (HAL_UART_Init(&huart2) != HAL_OK) return false;
-    s_ready = 1u;
     __HAL_UART_CLEAR_OREFLAG(&huart2);
     USART2->CR1 |= USART_CR1_RXNEIE;
     return true;
@@ -26,21 +24,12 @@ bool bsp_uart_write(const void *data, size_t size)
     if (data == NULL || size == 0u || size > sizeof s_tx[0]) return false;
     uint32_t mask = __get_PRIMASK();
     __disable_irq();
-    if (!s_ready || size > sizeof s_tx[0] - s_used) {
+    if (size > sizeof s_tx[0] - s_used) {
         g_uart_stats.tx_rejected++;
         __set_PRIMASK(mask);
         return false;
     }
-    uint8_t *out = s_tx[s_fill] + s_used;
-    const uint8_t *in = data;
-    /* Constant-size copies compile to word loads/stores, including unaligned input. */
-    if (size == 20u) {
-        memcpy(out, in, 20u); /* timestamp + three floats + tail: common 20 kHz path */
-    } else {
-        size_t i = 0u;
-        for (; i + 4u <= size; i += 4u) memcpy(out + i, in + i, 4u);
-        for (; i < size; ++i) out[i] = in[i];
-    }
+    memcpy(s_tx[s_fill] + s_used, data, size);
     s_used += (uint16_t)size;
     __set_PRIMASK(mask);
     return true;
@@ -48,7 +37,7 @@ bool bsp_uart_write(const void *data, size_t size)
 
 void bsp_uart_tick(void)
 {
-    if (!s_ready || s_busy || s_used == 0u) return;
+    if (s_busy || s_used == 0u) return;
     uint32_t mask = __get_PRIMASK();
     __disable_irq();
     uint16_t size = s_used;
@@ -63,8 +52,6 @@ void bsp_uart_tick(void)
     } else {
         /* No half-transfer work is needed. */
         __HAL_DMA_DISABLE_IT(huart2.hdmatx, DMA_IT_HT);
-        g_uart_stats.tx_bytes += size;
-        g_uart_stats.tx_batches++;
     }
 }
 

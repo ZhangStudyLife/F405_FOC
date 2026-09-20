@@ -1,14 +1,11 @@
 #ifndef APP_PROTOCOLS_JUSTFLOAT_H
 #define APP_PROTOCOLS_JUSTFLOAT_H
 
-#include <stdbool.h>
-#include <stddef.h>
 #include <math.h>
 #include "bsp_uart.h"
 
-/* 1..16 business channels, preceded by float milliseconds, followed by +Inf. */
-bool justfloat_array(const float *values, size_t count);
-/* Constant-size frame: no varargs promotion, no intermediate payload copy. */
+_Static_assert(sizeof(float) == 4, "JustFloat requires 32-bit floats");
+/* Milliseconds + 1..16 float channels + +Inf; UART copies the frame. */
 #define justfloat_send(...) \
     (sizeof((const float[]){__VA_ARGS__}) >= sizeof(float) && \
      sizeof((const float[]){__VA_ARGS__}) <= 16u * sizeof(float) && \
