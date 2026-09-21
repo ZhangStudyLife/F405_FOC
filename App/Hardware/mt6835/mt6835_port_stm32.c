@@ -8,6 +8,7 @@ static const uint8_t s_tx[6] = {0xa0, 0x03, 0, 0, 0, 0};
 static uint8_t s_rx[6];
 volatile float mt6835_angle_deg = NAN, mt6835_sample_delay;
 volatile uint32_t mt6835_errors;
+volatile uint32_t mt6835_first_error; /* 1: busy, 2: DMA; otherwise raw angle/status/CRC bytes. */
 
 /* Initialization only: register 0x001 is user RAM, not a device ID. */
 static int probe_transfer(uint8_t command, uint8_t value)
@@ -53,6 +54,7 @@ void mt6835_start(void)
     /* A transfer must finish within the preceding 50 us period. */
     if ((DMA1_Stream0->CR | DMA1_Stream5->CR) & DMA_SxCR_EN) {
         mt6835_angle_deg = NAN;
+        if (!mt6835_first_error) mt6835_first_error = 1u;
         mt6835_errors++;
         return;
     }
@@ -83,10 +85,16 @@ void mt6835_finish(void)
         (void)SPI3->DR;
         (void)SPI3->SR;
         mt6835_angle_deg = NAN;
+        if (!mt6835_first_error) mt6835_first_error = 2u;
     } else {
         mt6835_angle_deg = mt6835_decode(s_rx);
     }
-    if (isnan(mt6835_angle_deg)) mt6835_errors++;
+    if (isnan(mt6835_angle_deg)) {
+        if (!mt6835_first_error) mt6835_first_error =
+            ((uint32_t)s_rx[2] << 24) | ((uint32_t)s_rx[3] << 16) |
+            ((uint32_t)s_rx[4] << 8) | s_rx[5];
+        mt6835_errors++;
+    }
 }
 
 void mt6835_stop(void)
