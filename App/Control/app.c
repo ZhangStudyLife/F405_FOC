@@ -78,17 +78,15 @@ void app_sample(void)
         }
     }
 #endif
-    if (++divider == 10u) {
+    if (++divider == 2u) {
         divider = 0u;
         last_frame = bsp_uart_millis();
 #ifdef FOC_CAPTURE
         if (!dumping && !quiet)
 #endif
         {
-            /* New Ud/Uq are NEXT-period outputs, not this sample's applied voltage. */
-            const float frame[] = {(float)sequence, foc.command, foc.iq_ref, foc.id, foc.iq,
-                foc.ud, foc.uq, adc_sample.bus_voltage, adc_sample.b_voltage, adc_sample.c_voltage,
-                foc.electrical_deg, foc.rpm, (float)foc.state, (float)foc.fault, INFINITY};
+            /* 10 kHz diagnostic stream: current feedback plus raw ADC pin voltages. */
+            const float frame[] = {foc.id, foc.iq, adc_sample.b_voltage, adc_sample.c_voltage, INFINITY};
             (void)bsp_uart_write(frame, sizeof frame);
             bsp_uart_tick(); /* Fixed sample phase, after ADC and PWM submission. */
         }
