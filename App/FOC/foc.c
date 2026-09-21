@@ -170,7 +170,7 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
     foc.id = ia * c + beta * s;
     foc.iq = -ia * s + beta * c;
     if (foc.state == FOC_PRECHARGE || foc.state == FOC_RUN || foc.state == FOC_CALIBRATE) {
-        float trip = aligning ? 5.0f : 2.0f;
+        float trip = 10.0f;
         if (fabsf(ia) >= trip || fabsf(ib) >= trip || fabsf(ic) >= trip) { foc_trip(FOC_CURRENT); return; }
         if (!aligning && fabsf(foc.rpm) >= FOC_SPEED_MAX) { foc_trip(FOC_SPEED); return; }
     }
