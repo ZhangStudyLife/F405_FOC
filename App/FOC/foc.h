@@ -6,7 +6,7 @@
 
 #define FOC_BUS_MIN 8.0f
 #define FOC_BUS_MAX 36.0f
-#define FOC_SPEED_MAX 6000.0f /* Software overspeed trip, RPM. */
+#define FOC_SPEED_MAX 9400.0f /* 5010-KV360 rated maximum, RPM. */
 
 /* Nominal timing, pending scope validation of ADC/driver/analog delays. */
 #ifndef FOC_TRIGGER_TICKS

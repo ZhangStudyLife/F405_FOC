@@ -78,15 +78,18 @@ void app_sample(void)
         }
     }
 #endif
-    if (++divider == 4u) {
+    if (++divider == 10u) {
         divider = 0u;
         last_frame = bsp_uart_millis();
 #ifdef FOC_CAPTURE
         if (!dumping && !quiet)
 #endif
         {
-            /* 5 kHz diagnostic stream: current feedback plus raw ADC pin voltages. */
-            const float frame[] = {foc.id, foc.iq, adc_sample.b_voltage, adc_sample.c_voltage, INFINITY};
+            /* 2 kHz, 64 bytes: 64% of 2 Mbps, including 8N1 overhead. */
+            const float frame[] = {foc.id, foc.iq, adc_sample.b_voltage, adc_sample.c_voltage,
+                (float)sequence, foc.rpm, adc_sample.bus_voltage, foc.iq_ref, foc.electrical_deg,
+                foc.ud, foc.uq, duty[0], duty[1], duty[2],
+                (float)(foc.state | (foc.fault << 3) | (motor_mode << 7)), INFINITY};
             (void)bsp_uart_write(frame, sizeof frame);
             bsp_uart_tick(); /* Fixed sample phase, after ADC and PWM submission. */
         }

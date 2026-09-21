@@ -86,6 +86,7 @@ bool foc_calibrate(void)
     if (foc.state != FOC_IDLE || !foc.zero_ready || fabsf(foc.rpm) >= 5.0f) return false;
     aligning = true;
     integral_d = integral_q = 0.0f;
+    position = previous; /* Keep alignment deltas precise after many revolutions. */
     ticks = 0u;
     foc.state = FOC_PRECHARGE;
     return true;
@@ -128,6 +129,10 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
             foc_trip(FOC_BUS); return;
         }
     }
+    float s, c;
+    /* This encoder: repeatable second harmonic measured during unpowered coast. */
+    sincos_fast(mechanical_deg * (PI / 90.0f), &s, &c);
+    mechanical_deg += 0.52f * c;
     float delta = mechanical_deg - previous;
     if (delta > 180.0f) delta -= 360.0f;
     if (delta < -180.0f) delta += 360.0f;
@@ -163,7 +168,6 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
     float theta = foc_wrap((float)foc.calibration.direction * 7.0f * mechanical_deg * (PI / 180.0f) -
                           foc.calibration.zero - omega * encoder_delay);
     foc.electrical_deg = theta * (180.0f / PI);
-    float s, c;
     sincos_fast(theta, &s, &c);
     float ib = (b_voltage - foc.b_offset) * 50.0f, ic = (c_voltage - foc.c_offset) * 50.0f;
     float ia = -ib - ic, beta = (ib - ic) * 0.5773502692f;
