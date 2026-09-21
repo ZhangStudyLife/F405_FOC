@@ -143,7 +143,7 @@ bool app_command(const char *line)
         if (*p) return false;
         char *end;
         amps = strtof(line + 3, &end);
-        if (end == line + 3 || *end || !isfinite(amps) || fabsf(amps) > 0.8f) return false;
+        if (end == line + 3 || *end || !isfinite(amps) || fabsf(amps) > 5.0f) return false;
         command = RUN;
     } else return false;
     uint32_t key = bsp_motor_lock();

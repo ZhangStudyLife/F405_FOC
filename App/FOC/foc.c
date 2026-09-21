@@ -105,7 +105,7 @@ void foc_init(const foc_calibration_t *calibration)
 
 bool foc_current(float amps)
 {
-    if (!isfinite(amps) || fabsf(amps) > 0.8f) return false;
+    if (!isfinite(amps) || fabsf(amps) > 5.0f) return false;
     if (!foc.calibrated || !foc.zero_ready || (foc.state != FOC_IDLE && foc.state != FOC_RUN)) return false;
     foc.command = amps;
     if (foc.state == FOC_IDLE && amps != 0.0f) {
