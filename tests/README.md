@@ -1,4 +1,6 @@
-# 当前验证记录
+# 采样固件历史验证记录
+
+[FOC_TEST.md](FOC_TEST.md) 为早期电压模式历史记录。当前接口见 [App/README.md](../App/README.md)。`test_foc.c`、`test_foc_commands.c` 和 `capture_foc.py` 属于历史电压模式，不能针对当前电流模式编译或连接使用。以下保留改动前采样固件结果，不代表当前 FOC 固件。
 
 2026-09-20，STM32F405、168 MHz，ST-Link 8600A1002031363534313541。此文件替代旧 ADC/UART/编码器测试说明；历史内容可在 Git 历史和本机 `build/refactor/before.zip` 中查阅。
 
