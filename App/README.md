@@ -1,28 +1,51 @@
 # 固件结构与使用
 
-当前功能：M1 20 kHz 有感 dq 电流/转矩模式，Id_ref=0，Iq 命令范围 ±5 A、无运行斜坡；MT6835 角度换相，实测母线补偿，居中 SVPWM。当前 PI 标称带宽 600 Hz，无速度/位置环。每次启动先关断校零；已有 Flash 电角度记录时保持待机。首次/显式 cal 的对齐电压仍 0.6 V。本次实现与实测详见本地 [电流内环报告](../build/foc_analysis/REPORT.md)，旧 [tests/FOC_TEST.md](../tests/FOC_TEST.md) 属于历史电压模式。
+当前功能：M1 20 kHz 有感 FOC，Id_ref=0，Iq 命令范围 ±5 A、1 A/s 参考斜坡；MT6835 角度换相，实测母线补偿，居中 SVPWM。当前 PI 标称带宽 600 Hz。在电流环之上新增 **1 kHz 速度环与位置环（基础 P+I）**，输出仍是 Iq 参考；USB 20 kHz 改为 **`send 0..3` 四组分组日志**。每次启动先关断校零；已有 Flash 电角度记录时保持待机。首次/显式 cal 的对齐电压仍 0.6 V。本次实现与实测详见本地 [电流内环报告](../build/foc_analysis/REPORT.md)，旧 [tests/FOC_TEST.md](../tests/FOC_TEST.md) 属于历史电压模式。
 
 ## 模块
 
 | 位置 | 职责 |
 |---|---|
-| `Control/app.c` | 初始化、串口命令、UART 2 kHz 和 USB 20 kHz 回传 |
-| `FOC/foc.c` | 零偏、ABC/dq、双 PI/抗饱和、预测角度、SVPWM、校准状态 |
+| `Control/app.c` | 初始化、串口命令、UART 2 kHz 和 USB 20 kHz 分组回传 |
+| `Control/control.c` | 1 kHz 速度环/位置环（串级），目标接收、看门狗、多圈位置累积 |
+| `FOC/foc.c` | 零偏、ABC/dq、双 PI/抗饱和、预测角度、SVPWM、校准状态、Iq 斜坡 |
 | `Hardware/bsp/bsp_motor.c` | TIM8 功率输出、谷底更新/超时关断、校准 Flash |
-| `Hardware/bsp/bsp_adc.c` | TIM8 采样触发、双 ADC 同步 DMA、电压换算 |
+| `Hardware/bsp/bsp_adc.c` | TIM8 采样触发、双 ADC 同步 DMA、电压换算、原始码值 |
 | `Hardware/mt6835/mt6835.c` | 无 HAL 的 CRC 校验及角度解码 |
-| `Hardware/mt6835/mt6835_port_stm32.c` | 固定板级 SPI3/PA0 接线、DMA 启停 |
+| `Hardware/mt6835/mt6835_port_stm32.c` | 固定板级 SPI3/PA0 接线、DMA 启停、原始角度 |
 | `Hardware/bsp/bsp_can.c` | CAN1 非阻塞收发和接收队列 |
 | `Hardware/bsp/bsp_uart.c` | UART DMA 发送、接收队列 |
 | `Hardware/bsp/bsp_usb.*` | 原生 USB CDC、整帧异步发送队列、接收背压 |
-| `Protocols/JustFloat/justfloat.h` | JustFloat 帧封装 |
+| `Protocols/JustFloat/justfloat.h` | JustFloat 帧封装（UART 2 kHz 仍用） |
 
 应用和协议不依赖 HAL；硬件驱动不调用应用。`Core/Src/main.c` 只调用 `app_init()`，主循环处理命令/校准保存后休眠；`stm32f4xx_it.c` 连接各驱动和应用回调。自写代码只使用生成文件的 USER CODE 块，其他代码保持 CubeMX 所有权。
 
-USB 端口置 DTR 后，每个采样回调通过 `usb_justfloat` 回传 8 通道：微秒时间戳、目标 Iq、Ib、Ic、Id、Iq、Uq、机械角，720 kB/s；
-UART 封装接口改名为 `uart_justfloat`。USB 需要 PC 持续接收，溢出会锁存；
-USB 支持 `Iq 0.20` / `stop` 加实际 CR、LF 或 CRLF，前台解析，不混入文本回显。
-通道单位、时间戳回绕和 VOFA 配置见 [USB_TEST.md](../tests/USB_TEST.md)。
+USB 端口置 DTR 后，每个采样回调通过一次 `bsp_usb_write` 回传 **12 个小端 float32 + JustFloat 帧尾，共 52 字节**，960,000 B/s。下标 0 是打包时间戳/状态字，下标 1 是打包序号/组号，下标 2..11 由 `send X` 选定的日志组决定：
+
+| 组 | 内容 |
+|---|---|
+| 0 | B/C/母线 ADC 原始码值、三路电压、编码器**未修正**角度、采样微秒、`b_offset` |
+| 1 | Ib/Ic、电角度、`iq_ref`、PI 积分器 `integral_d/q`、`ud/uq`、零偏 |
+| 2 | `ud/uq`、本周期生效的 CCR/占空比、采样窗口电压上限、`Vbus/√3` 线性上限 |
+| 3 | Iq 参考链、多圈 `pos_deg`、目标位置、编码器 `rpm`、目标转速、外环输出、控制模式 |
+
+通道表、位打包、时间/丢帧判据、分析配方见 [tools/bench/README.md](../tools/bench/README.md)。
+
+UART 封装接口为 `uart_justfloat`，仍是 2 kHz、15 float。USB 需要 PC 持续接收，溢出会锁存；命令经 USB 或 UART 前台解析，支持实际 CR、LF 或 CRLF，不混入文本回显。
+
+## 控制模式
+
+`Iq <A>` / `rpm <v>` / `pos <deg>` 三条命令**命令即切模式**，无需额外 mode 命令。三者都通过同一个 PRECHARGE 联锁启动（2 ms 三低侧导通），`stop` 是唯一的下降路径。
+
+- **Torque**：目标 Iq，与既有语义一致；`Iq 0` 待机时不启动，运行中保持零目标电流环。参考按 **1 A/s** 从上一个值斜坡到新目标（20 kHz 定步长），`stop` 清零并取消未完成的斜坡。
+- **Speed**：1 kHz 速度环，目标 ±9400 RPM。速度由 1 kHz 上的多圈位置差分得到（编码器 21 bit，1 ms 内行程远高于量化底噪），再过一阶 100 Hz 滤波（`CONTROL_SPEED_FILTER`）；**不用 `foc.rpm`**，它的 1.57 Hz 低通在 1 kHz 外环里相位滞后过大。
+- **Position**：位置环 P 输出转速目标，再串速度环 PI，最终输出 Iq 参考。目标为**绝对多圈角度**（如 `pos 720.00` 表示一圈半之外的两整圈），`zero` 把当前位置定义为 0°（需停机且静止）。位置增益取 8 RPM/°：更高的 20 RPM/° 会让位置-速度这对在解析模型下欠阻尼（阻尼比约 0.26）。
+
+参数在 `App/Control/control.c` 顶部常量块：`SPEED_KP`、`SPEED_KI`、`POSITION_KP`、`POSITION_KI`（默认 0）、`CONTROL_SPEED_FILTER`。调参顺序：先 `SPEED_KP` 到跟得上且不振荡，再加 `SPEED_KI` 消静差，最后 `POSITION_KP`。外环输出限幅与 `Iq` 命令同为 ±5 A，外环不可能要求比手动 `Iq` 更大的电流。
+
+**主机看门狗**：Speed/Position 模式下若超过 **200 ms** 没有收到新目标，置 `FOC_UART` 并停机——外环握着计算出的参考值，PC 挂死必须能自停。主机回来后重新下发目标即可清除该故障。Torque 模式保持历史语义，没有该看门狗。
+
+外环在 `foc_step` 的 `FOC_RUN` 分支内调度：`control_step()` 以 `motor_sample_us` 计时，每毫秒执行一次；同一周期内的其余 19 个采样点沿用上一个参考值。电流环的 PI、抗饱和、预测角度与 SVPWM 未改动。
 
 ## 采样链路
 
@@ -51,20 +74,36 @@ USART2：PA2 TX / PA3 RX，**2000000 baud、8N1、无流控**。当前转换器 
 
 当前应用以 2 kHz 发送 15 个小端 float32：`Id A、Iq A、B采样电压V、C采样电压V、采样序号、RPM、母线V、Iq参考A、电角度°、Ud V、Uq V、已生效占空比A/B/C、状态字`，随后 `00 00 80 7F`，共 64 字节，含 8N1 开销占 2 Mbps 的 64%。序号为 24 位整数，每帧增加 10；状态字转整数后，低 3 位为状态、随后 4 位为故障、随后 2 位为功率模式。
 
-命令 `Iq 0.20\r\n` / `Iq -0.20\r\n`，支持整数或最多两位小数，范围 ±5 A；拒绝非法格式/非有限值/越界。`Iq 0` 运行中仍保持电流环，待机时不启动；`stop` 立即关断。参考直接阶跃和跨零，无运行斜坡；负 Iq 表示转矩方向，不等于立即负转速。`cal` 仅静止待机重校准，`clear` 仅清已消失故障，不自启。Set/run 电压运行入口已移除。
+命令支持整数或最多两位小数，拒绝非法格式/非有限值/越界：
+
+| 命令 | 范围 | 说明 |
+|---|---|---|
+| `Iq 0.20` | ±5 A | Torque 模式目标，1 A/s 参考斜坡 |
+| `rpm -500` | ±9400 RPM | Speed 模式目标，**可正负** |
+| `pos 720.00` | ±1e6° | Position 模式目标，绝对多圈机械角度 |
+| `zero` | — | 把当前位置定义为 0°，需停机且静止 |
+| `send 0`..`send 3` | — | 切换 20 kHz 日志组，纯日志开关 |
+| `stop` | — | 立即关断，取消斜坡与外环 |
+| `clear` | — | 仅清已消失故障，不自启 |
+| `cal` | — | 仅静止待机重校准 |
+| `hello` | — | 仅 UART 回 `#FOC 1.1 <状态字>`，不进 USB 二进制流 |
+
+负 Iq 表示转矩方向，不等于立即负转速。`Iq 0` 运行中仍保持电流环，待机时不启动；`rpm 0`/`pos 0` 表示"保持在零转速/当前位置"，属于真实运行请求。乱码、超长或非法命令不会污染遥测：超长行整行丢弃，只递增 `app_command_rejected`（未定义命令除外，与历史行为一致）。Set/run 电压运行入口已移除。
 
 `bsp_uart_write(data, size)` 复制后立即返回；双 256-byte TX 缓冲，满时整帧拒绝。`bsp_uart_read()` 从 127-byte 有效容量接收队列非阻塞取数据。`g_uart_stats` 记录拒绝、DMA 和 RX 错误。接收使用逐字节中断，不承诺满速持续双工；不得直接混用 HAL UART 收发。
 
-CAN1：PB8 RX / PB9 TX，1 Mbps、标准/扩展/远程帧；`bsp_can_send()` 提交至硬件邮箱，不等待 ACK；`bsp_can_recv()` 从队列取帧。队列有效容量 15 帧，满时丢新帧并递增 `can_rx_lost`。应用不解释 CAN 命令；串口支持 `Iq <A>`、`stop`、`cal`、`clear`，不混入文本回显。
+CAN1：PB8 RX / PB9 TX，1 Mbps、标准/扩展/远程帧；`bsp_can_send()` 提交至硬件邮箱，不等待 ACK；`bsp_can_recv()` 从队列取帧。队列有效容量 15 帧，满时丢新帧并递增 `can_rx_lost`。应用不解释 CAN 命令；串口命令见上表，不混入文本回显。
 
 ## 构建与配置
 
 工程根目录执行 `cmake --preset Release`、`cmake --build --preset Release`。`../download/flash.py flash Release` 自动选择匹配 F405/1MB 的 ST-Link 并校验烧录。Debug 用于调试，实时性用 Release 测量。
 
+主机侧台架工具与数据集见 [tools/bench/README.md](../tools/bench/README.md)：`../download/bench.cmd list|discover|run|report|chain`。
+
 `.ioc` 提供基础外设/引脚初始化；最终 ADC 规则同步、TRGO 和 DMA 配置由 BSP 在启动时覆盖。重新生成不会改动 App，但必须保留 USER CODE。DMA2 Stream0、DMA1 Stream0/5 已由驱动占用，不能分配给其他设备。
 TIM5 由 `bsp_motor_init()` 配置为 1 MHz 自由运行计时，专用于 ADC DMA 入口的微秒时间戳；不能另作他用。
 
-本次电流验证见本地 `../build/foc_analysis/REPORT.md`；此前电压模式历史结果见 `../tests/FOC_TEST.md`，采样链路与磁编见 `../tests/SAMPLING_TEST.md`，测试目录索引见 `../tests/README.md`。旧测试入口、测速/EEPROM/多实例接口及通用 GPIO/SPI/时间包装已删除，HAL/CMSIS 原厂文件不做手工裁剪。
+本次电流验证见本地 `../build/foc_analysis/REPORT.md`；此前电压模式历史结果见 `../tests/FOC_TEST.md`，采样链路与磁编见 `../tests/SAMPLING_TEST.md`，测试目录索引见 `../tests/README.md`，主机台架工具见 `../tools/bench/README.md`。旧测试入口、测速/EEPROM/多实例接口及通用 GPIO/SPI/时间包装已删除，HAL/CMSIS 原厂文件不做手工裁剪。
 
 ## 历史 Set 电压扩展验证（2026-09-20，不代表当前电流固件）
 

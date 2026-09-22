@@ -9,14 +9,19 @@
 |---|---|---|---|
 | `test_mt6835_crc.c` | 主机测试 | 当前 | 磁编解码：边界角度、独立逐位 CRC 参考、全部单比特损坏、传感器故障状态、历史真实帧 |
 | `test_justfloat.c` | 主机测试 | 当前 | 两种传输的帧字节：精确帧、参数单次求值、16 通道上限、NaN、发送被拒 |
-| `test_app_usb.c` | 主机测试 | 当前 | 真实 `app.c` + `foc.c`：CR/LF/CRLF、拆包/粘包、UART/USB 独立组行、非法/超长行、会话切换、20,000 帧电流遥测通道与时间戳回绕 |
+| `test_app_usb.c` | 主机测试 | 当前 | 真实 `app.c` + `foc.c` + `control.c`：四组 12 float 帧布局、头字位打包、`send` 切组、`Iq`/`rpm`/`pos`/`zero`/`hello` 解析与拒绝、CR/LF/CRLF、拆包/粘包、UART/USB 独立组行、会话切换、20,000 帧、1 A/s 斜坡、外环参考替换 |
+| `test_control_pid.c` | 主机测试 | 当前 | 真实 `control.c` + 一阶被控对象：速度跟踪（±）、输出限幅与抗饱和、200 ms 主机看门狗、多圈位置收敛与反向、`zero`、`stop` 复位 |
 | `test_usb_queue.c` | 主机测试 | 当前 | 直接包含生产 `bsp_usb.c`：20,000 帧逐字节比对、BUSY 重试、缓冲所有权、环形/计数器回绕、溢出锁存、复位统计、RX 背压（用 `usb_stubs/` 替代 CDC 回调） |
 | `test_foc_recalibration.c` | 主机测试 | 当前 | 校准状态机回归：零偏采集 → `foc_calibrate()` → 对齐 → `FOC_SAVE`，方向判定与 600 转滑行 |
-| `capture_usb.py` | PC 脚本 | 当前 | USB 8 通道 20 kHz 流校验：DTR 会话排空、帧尾对齐、时间戳模差 45..55 µs、速率 19,800..20,200 帧/s |
+| `capture_usb.py` | PC 脚本 | 当前 | 单组 20 kHz 流长跑校验：DTR 会话排空、帧尾对齐、`seq` 差 1 与 µs 差 50 的连续性、速率 19,800..20,200 帧/s |
+| `foc_stub.c` | 夹具 | 当前 | 给 `test_control_pid.c` 用的最小 `foc.c` 状态机替身，不链接完整电流环 |
 | `usb_stubs/usbd_cdc_if.h` | 夹具 | 当前 | 只给 `test_usb_queue.c` 用的最小 CDC/USBD 声明 |
 | `legacy/test_foc.c` | 主机测试 | 历史 | 电压模式 FOC 数学、缓升、窗口与校准仿真，见下 |
 | `legacy/test_foc_commands.c` | 主机测试 | 历史 | 电压模式命令、关断、校准记录校验 |
 | `legacy/capture_foc.py` | PC 脚本 | 历史 | 48 字节 / 11 float 电压模式协议记录与 `run <V>` 试验 |
+
+针对台架的工况库、四组数据采集、归档与报告在 [tools/bench/](../tools/bench/README.md)；
+`capture_usb.py` 只做单组流的长跑校验，不产生数据集。
 
 ## 可重复的主机测试
 
@@ -27,16 +32,22 @@ gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Hardware/mt6835 tests/test_mt6835_
 ./build/test_mt6835_crc.exe
 gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Protocols/JustFloat -I App/Hardware/bsp tests/test_justfloat.c -o build/test_justfloat.exe
 ./build/test_justfloat.exe
-gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Control -I App/FOC -I App/Protocols/JustFloat -I App/Hardware/bsp -I App/Hardware/mt6835 tests/test_app_usb.c App/Control/app.c App/FOC/foc.c -lm -o build/test_app_usb.exe
+gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Control -I App/FOC -I App/Protocols/JustFloat -I App/Hardware/bsp -I App/Hardware/mt6835 tests/test_app_usb.c App/Control/app.c App/Control/control.c App/FOC/foc.c -lm -o build/test_app_usb.exe
 ./build/test_app_usb.exe
+gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Control -I App/FOC -I App/Hardware/bsp -I App/Hardware/mt6835 tests/test_control_pid.c tests/foc_stub.c App/Control/control.c -lm -o build/test_control_pid.exe
+./build/test_control_pid.exe
 gcc -std=c11 -Wall -Wextra -Werror -O2 -I tests/usb_stubs -I App/Hardware/bsp tests/test_usb_queue.c -o build/test_usb_queue.exe
 ./build/test_usb_queue.exe
-gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/FOC tests/test_foc_recalibration.c App/FOC/foc.c -lm -o build/test_foc_recalibration.exe
+gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/FOC -I App/Control -I App/Hardware/bsp -I App/Hardware/mt6835 tests/test_foc_recalibration.c App/FOC/foc.c App/Control/control.c -lm -o build/test_foc_recalibration.exe
 ./build/test_foc_recalibration.exe
 ```
 
-2026-09-22 本机实测：五个程序均构建通过（`-Wall -Wextra -Werror` 无警告）并打印 PASS。它们不属于固件
-CMake，不参与 Debug/Release 构建。
+解析器自检无需硬件：`python tools/bench/selftest.py`（帧字节往返、错位重同步、
+丢帧检测、损坏拒绝、通道表、归档往返、工况限值）。
+
+2026-09-23 本机实测：六个 C 程序与 `selftest.py` 均构建通过（C 用
+`-Wall -Wextra -Werror` 无警告）并打印 PASS。它们不属于固件 CMake，不参与
+Debug/Release 构建。
 
 ## 历史资产（`tests/legacy/`）
 
