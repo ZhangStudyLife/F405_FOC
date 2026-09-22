@@ -2,14 +2,14 @@
 
 ## Project Structure & Module Organization
 
-This is STM32F405 firmware written in C11. The current firmware target runs ADC bring-up and UART/JustFloat telemetry; encoder sources remain available separately.
+This is STM32F405 firmware written in C11. The current firmware target runs a 20 kHz encoder-sensed (MT6835 angle feedback) current-mode FOC loop with UART 2 kHz and USB 20 kHz JustFloat telemetry; see `App/README.md`.
 
-- `App/Control/`: application orchestration, currently `adc_test.c`.
+- `App/Control/`: application orchestration (`app.c`), command parsing and telemetry.
 - `App/Hardware/bsp/`: board peripherals; `App/Hardware/mt6835/`: encoder driver and STM32 adapter.
 - `App/Protocols/JustFloat/`: telemetry framing.
 - `Core/` and `Drivers/`: CubeMX-generated initialization, HAL, and CMSIS.
 - `cmake/`, `CMakePresets.json`, and `405_FOC.ioc`: build and peripheral configuration.
-- `tests/`: host C tests and ADC/UART hardware validation records. Hardware references include `硬件PCB拓扑.md`.
+- `tests/`: host C tests, PC-side validation scripts and hardware validation records (USB/UART/sampling/FOC); see `tests/README.md`. Hardware references include `硬件PCB拓扑.md`.
 
 ## Build, Test, and Development Commands
 
@@ -39,7 +39,7 @@ gcc -std=c11 -Wall -Wextra -O2 -I App/Hardware/mt6835 tests/test_mt6835_crc.c Ap
 ./build/test_mt6835_crc.exe
 ```
 
-Repeat with `test_mt6835_speed`. Name tests `test_<module>_<behavior>.c`. For fixes, reproduce the failure and verify the correction. Follow `tests/ADC_TEST.md` and `tests/UART_TEST.md` for relevant board checks; distinguish historical measurements from current results.
+The complete list of current host tests, their exact commands and expected output is in `tests/README.md`; tests for the removed voltage-mode API live in `tests/legacy/` and must not be built against the current API. Name tests `test_<module>_<behavior>.c`. For fixes, reproduce the failure and verify the correction. Follow `tests/SAMPLING_TEST.md`, `tests/UART_TEST.md` and `tests/USB_TEST.md` for relevant board checks; distinguish historical measurements from current results.
 
 ## Commit & Pull Request Guidelines
 

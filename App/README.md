@@ -1,6 +1,6 @@
 # 固件结构与使用
 
-当前功能：M1 20 kHz 有感 dq 电流/转矩模式，Id_ref=0，Iq 命令范围 ±5 A、无运行斜坡；MT6835 角度换相，实测母线补偿，居中 SVPWM。当前 PI 标称带宽 600 Hz，无速度/位置环。每次启动先关断校零；已有 Flash 电角度记录时保持待机。首次/显式 cal 的对齐电压仍 0.6 V。本次实现与实测详见本地 [电流内环报告](../build/foc_analysis/REPORT.md)，旧 tests/FOC_TEST.md 属于历史电压模式。
+当前功能：M1 20 kHz 有感 dq 电流/转矩模式，Id_ref=0，Iq 命令范围 ±5 A、无运行斜坡；MT6835 角度换相，实测母线补偿，居中 SVPWM。当前 PI 标称带宽 600 Hz，无速度/位置环。每次启动先关断校零；已有 Flash 电角度记录时保持待机。首次/显式 cal 的对齐电压仍 0.6 V。本次实现与实测详见本地 [电流内环报告](../build/foc_analysis/REPORT.md)，旧 [tests/FOC_TEST.md](../tests/FOC_TEST.md) 属于历史电压模式。
 
 ## 模块
 
@@ -64,7 +64,7 @@ CAN1：PB8 RX / PB9 TX，1 Mbps、标准/扩展/远程帧；`bsp_can_send()` 提
 `.ioc` 提供基础外设/引脚初始化；最终 ADC 规则同步、TRGO 和 DMA 配置由 BSP 在启动时覆盖。重新生成不会改动 App，但必须保留 USER CODE。DMA2 Stream0、DMA1 Stream0/5 已由驱动占用，不能分配给其他设备。
 TIM5 由 `bsp_motor_init()` 配置为 1 MHz 自由运行计时，专用于 ADC DMA 入口的微秒时间戳；不能另作他用。
 
-本次电流验证见本地 `../build/foc_analysis/REPORT.md`；此前电压/采样固件历史结果见 `../tests/FOC_TEST.md` 与 `../tests/README.md`。旧测试入口、测速/EEPROM/多实例接口及通用 GPIO/SPI/时间包装已删除，HAL/CMSIS 原厂文件不做手工裁剪。
+本次电流验证见本地 `../build/foc_analysis/REPORT.md`；此前电压模式历史结果见 `../tests/FOC_TEST.md`，采样链路与磁编见 `../tests/SAMPLING_TEST.md`，测试目录索引见 `../tests/README.md`。旧测试入口、测速/EEPROM/多实例接口及通用 GPIO/SPI/时间包装已删除，HAL/CMSIS 原厂文件不做手工裁剪。
 
 ## 历史 Set 电压扩展验证（2026-09-20，不代表当前电流固件）
 
@@ -72,7 +72,7 @@ Debug/Release 与主机命令、角度、母线、采样窗口及 2 kHz 分频�
 
 最终 motor_work_max=3075 cycles（18.30 us），区间从 ADC DMA IRQ 入口至控制及遥测完成，包含 SPI 等待，并非纯 CPU 占用。TIM8 PSC=0、ARR=4200、RCR=1。最小周期统计回读为 0，尚不能用本次极值统计验收全部中断周期。首次版本曾触发时序保护，减少重复除法及限幅库调用后完成上述四档测试，未放宽保护。
 
-原始日志在本地 build/foc/set_*.bin、CSV、JSON。未测反向高速、相电流准确值、MOS/ADC 模拟波形；电源限流与实际电流未由软件读回。旧 tests/FOC_TEST.md 和 capture_foc.py 为旧 48 字节协议记录/工具，不适用于新的 24 字节协议。
+原始日志在本地 build/foc/set_*.bin、CSV、JSON。未测反向高速、相电流准确值、MOS/ADC 模拟波形；电源限流与实际电流未由软件读回。旧 `tests/FOC_TEST.md` 和 `tests/legacy/capture_foc.py` 为旧 48 字节协议记录/工具，不适用于新的 24 字节协议。
 
 
 ## 本次电流模式验证（2026-09-20）

@@ -1,12 +1,26 @@
-# 采样固件历史验证记录
+# tests 目录索引
 
-[FOC_TEST.md](FOC_TEST.md) 为早期电压模式历史记录。当前接口见 [App/README.md](../App/README.md)。`test_foc.c`、`test_foc_commands.c` 和 `capture_foc.py` 属于历史电压模式，不能针对当前电流模式编译或连接使用。以下保留改动前采样固件结果，不代表当前 FOC 固件。
+本目录保存**主机端回归测试**、**PC 侧验证脚本**和**实机测试记录**。固件接口、参数与当前配置见
+[App/README.md](../App/README.md)；`build/` 下的原始数据、JSON 和报告只在本机保留，不进入版本库。
 
-2026-09-20，STM32F405、168 MHz，ST-Link 8600A1002031363534313541。此文件替代旧 ADC/UART/编码器测试说明；历史内容可在 Git 历史和本机 `build/refactor/before.zip` 中查阅。
+## 代码
+
+| 文件 | 类型 | 状态 | 作用 |
+|---|---|---|---|
+| `test_mt6835_crc.c` | 主机测试 | 当前 | 磁编解码：边界角度、独立逐位 CRC 参考、全部单比特损坏、传感器故障状态、历史真实帧 |
+| `test_justfloat.c` | 主机测试 | 当前 | 两种传输的帧字节：精确帧、参数单次求值、16 通道上限、NaN、发送被拒 |
+| `test_app_usb.c` | 主机测试 | 当前 | 真实 `app.c` + `foc.c`：CR/LF/CRLF、拆包/粘包、UART/USB 独立组行、非法/超长行、会话切换、20,000 帧电流遥测通道与时间戳回绕 |
+| `test_usb_queue.c` | 主机测试 | 当前 | 直接包含生产 `bsp_usb.c`：20,000 帧逐字节比对、BUSY 重试、缓冲所有权、环形/计数器回绕、溢出锁存、复位统计、RX 背压（用 `usb_stubs/` 替代 CDC 回调） |
+| `test_foc_recalibration.c` | 主机测试 | 当前 | 校准状态机回归：零偏采集 → `foc_calibrate()` → 对齐 → `FOC_SAVE`，方向判定与 600 转滑行 |
+| `capture_usb.py` | PC 脚本 | 当前 | USB 8 通道 20 kHz 流校验：DTR 会话排空、帧尾对齐、时间戳模差 45..55 µs、速率 19,800..20,200 帧/s |
+| `usb_stubs/usbd_cdc_if.h` | 夹具 | 当前 | 只给 `test_usb_queue.c` 用的最小 CDC/USBD 声明 |
+| `legacy/test_foc.c` | 主机测试 | 历史 | 电压模式 FOC 数学、缓升、窗口与校准仿真，见下 |
+| `legacy/test_foc_commands.c` | 主机测试 | 历史 | 电压模式命令、关断、校准记录校验 |
+| `legacy/capture_foc.py` | PC 脚本 | 历史 | 48 字节 / 11 float 电压模式协议记录与 `run <V>` 试验 |
 
 ## 可重复的主机测试
 
-在工程根目录运行：
+在仓库根目录执行（主机 GCC，需要 `-lm`）：
 
 ```sh
 gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Hardware/mt6835 tests/test_mt6835_crc.c App/Hardware/mt6835/mt6835.c -lm -o build/test_mt6835_crc.exe
@@ -15,40 +29,62 @@ gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Protocols/JustFloat -I App/Hardwar
 ./build/test_justfloat.exe
 gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Control -I App/FOC -I App/Protocols/JustFloat -I App/Hardware/bsp -I App/Hardware/mt6835 tests/test_app_usb.c App/Control/app.c App/FOC/foc.c -lm -o build/test_app_usb.exe
 ./build/test_app_usb.exe
+gcc -std=c11 -Wall -Wextra -Werror -O2 -I tests/usb_stubs -I App/Hardware/bsp tests/test_usb_queue.c -o build/test_usb_queue.exe
+./build/test_usb_queue.exe
+gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/FOC tests/test_foc_recalibration.c App/FOC/foc.c -lm -o build/test_foc_recalibration.exe
+./build/test_foc_recalibration.exe
 ```
 
-均通过。编码器测试覆盖边界角度、独立逐位 CRC 参考、数据/CRC 任意单比特损坏、所有传感器故障状态、历史真实采样帧。JustFloat 覆盖精确帧字节、单次求值、16 通道上限、NaN 和发送拒绝。
+2026-09-22 本机实测：五个程序均构建通过（`-Wall -Wextra -Werror` 无警告）并打印 PASS。它们不属于固件
+CMake，不参与 Debug/Release 构建。
 
-`test_app_usb.c` 针对当前电流模式：CR/LF/CRLF、拆包/粘包、UART/USB 独立组行、非法/超长行、
-会话切换、启动/停止语义，以及 20,000 帧电流环遥测的通道顺序/单位/时间戳回绕。
+## 历史资产（`tests/legacy/`）
 
-## 构建和最终固件
+三个文件针对已删除的电压模式 API，**不能**对当前电流模式固件编译或连接使用：
 
-- Debug / Release 编译通过；最终 Release 已烧录、回读校验并运行。
-- App 手写 C/H 从 20 文件、3173 行缩减；删除测试入口、通用包装和未使用功能，不裁剪 HAL/CMSIS。
-- Release Flash（text+data）16888 → 14940 bytes；BSS 4808 → 2792 bytes。
-- 最终固件 COM14、2 Mbps 连续 30 秒获得 30001 个有效位置帧，所有相邻时间戳均差 1 ms，1000 Hz；无内部错帧、NaN 或越界角度。
-- ADC 错误、编码器错误、UART 拒绝/DMA/RX 错误均为 0。ADC 静态电压约 B=1.662 V、C=1.681 V、母线=4.527 V；只是数字链路检查，不是精度校准。
-- SWD 确认 TIM8 PSC=0、ARR=4200、CCR4=4100、CCER 仅 CH4；六路栅极引脚均为 GPIO 推挽低。未用示波器测实际栅极电压。
+- `legacy/test_foc.c`：`foc_step` 现需 5 个参数（旧代码给 2 个）、`foc_modulate` 现需 4 个参数（旧代码给 5 个）、
+  `foc_run` 已不存在。
+- `legacy/test_foc_commands.c`：同样的 `foc_step` 参数不匹配；`Set <V>` / `run <V>` 电压命令入口已移除
+  （现只接受 `Iq <A>`、`stop`、`cal`、`clear`），且 UART 帧断言针对旧的 24 字节帧（现为 64 字节）。
+- `legacy/capture_foc.py`：解析 48 字节 / 11 float 帧，只用于旧协议记录。
 
-## 临时插桩实测（最终固件已移除）
+`App/Hardware/bsp/bsp_motor_record.h`（`record_t` / `checksum()` / `record_valid()`）仍在，但旧命令语义不适用。
+历史结论保留在 [FOC_TEST.md](FOC_TEST.md)。
 
-在 Release 两个 DMA 中断内使用 DWT 测量调用区间，前台不休眠。持续窗口内 ADC 约 158 万次，ADC/编码器错误均为 0。
+## 文档
 
-| 项目 | 测量结果 |
+| 文档 | 覆盖内容 |
 |---|---|
-| ADC DMA 完成周期 | 8391～8409 cycles，即 49.946～50.054 us |
-| ADC 发布 + SPI DMA 启动 | 初次窗口平均约 0.72 us；各窗口最大 155 cycles（0.923 us） |
-| SPI DMA 完成 + 解码 + 20 分频上传 | 初次窗口平均约 1.10 us；各窗口最大 415 cycles（2.470 us） |
-| 两段测量区间最大值之和 | 570 cycles（3.393 us） |
-| ADC IRQ 入口至编码器处理完成 | 最大 1453 cycles（8.649 us），包含 DMA 线上传输 |
+| [USB_TEST.md](USB_TEST.md) | USB FS CDC：36 字节 / 8 通道 20 kHz 布局、VOFA+ 设置、USB 命令、64 KB 队列与完整性边界、主机测试、短测/长测/CPU 插桩/UART 对比 |
+| [UART_TEST.md](UART_TEST.md) | USART2 2 Mbps：64 字节 / 15 float 2 kHz 布局、串口命令、驱动约束、波特率阶梯与长测、命令接收核验、Debug 实时路径修复 |
+| [SAMPLING_TEST.md](SAMPLING_TEST.md) | 采样链路：TIM8 + 双 ADC + SPI/DMA 调度、ADC 采样时间优化、20 kHz 周期与 CPU 口径、MT6835 编码器与故障注入 |
+| [FOC_TEST.md](FOC_TEST.md) | 电机控制：2026-09-20 电压模式历史记录（命令、帧、校准、Flash 记录、实测），当前电流模式见 `App/README.md` |
 
-此前固件 ADC ISR 最大测量区间为 1933 cycles（11.506 us），含 SPI DMA 忙等。新路径不再等待 SPI。上述区间不含完整异常进出栈、函数序言/尾声、所有统计指令及 UART/CAN 中断；不能当作精确全系统 CPU 占用，也不宣称是所有实现中绝对最低开销。
+## 原始记录位置（本机，不入版本库）
 
-## 通信测试
+| 目录 | 内容 |
+|---|---|
+| `build/UartStress/results/` | 2026-09-18 波特率阶梯、3.5 Mbps 长测、过载与尾包 JSON |
+| `build/bench_debug/20260921_uart/`、`20260921_vofa/` | 串口命令失效核验、VOFA/Debug 实时路径修复 |
+| `build/bench_debug/20260922_1137_usb/`（旧记录）、`20260922_1232_usb/`（本轮） | USB 压力测试与 900 秒长测（`summary.json`、`endurance_900s.*`） |
+| `build/bench_debug/20260922_1338_compare/` | UART / USB 同帧 CPU 对比（`RESULT.md`、`summary.json`） |
+| `build/bench_debug/20260922_1418_usb_current/` | 当前电流模式 USB 布局单向/双向实测 |
+| `build/bench_debug/20260921_1431_noise/` | 无负载自动化调试、编码器二次谐波补偿对照 |
+| `build/adc_optimization/` | ADC 母线采样时间优化（`*_summary.json`、`final_rate.json`、`final_registers.json`） |
+| `build/refactor/` | 重构前备份、插桩源、板上寄存器快照、最终串口 JSON |
+| `build/foc/`、`build/foc_analysis/`、`build/current_audit/`、`build/current_iteration/` | 电压模式实测、电流内环报告、电流采样核验与响应迭代 |
+| `build/bench_debug/20260921_log_analysis/` | 外部日志分析（13 次 `FOC_BUS` 保护停转） |
 
-临时固件 CAN 静默回环验证：20 帧入队后保留前 15 帧、丢弃计数 5；顺序/内容正确；标准、扩展和远程帧通过；非法 DLC/ID 拒绝。测试后恢复 NORMAL，最终固件不含回环和自测。未验证外部 CAN 收发器及总线 ACK。
+## 其他一次性板级记录
 
-临时固件串口回显验证：2 Mbps 下 76 字节从上位机发出、MCU 接收并完整回传，相关错误计数为 0。3.5 Mbps 同样测试产生 76 次 RX 错误，因此最终使用 2 Mbps。没有进行持续满速双工验收，应用最终不自动回显。
+CAN1：临时固件静默回环验证——20 帧入队后保留前 15 帧、丢弃计数 5；顺序与内容正确；标准、扩展、远程帧通过；
+非法 DLC/ID 被拒绝。测试后恢复 NORMAL，最终固件不含回环与自测。未验证外部 CAN 收发器及总线 ACK，
+此后没有新的 CAN 记录（当前接口见 `App/README.md`）。
 
-本机原始记录在 `build/refactor/`：重构前备份、临时插桩源、板上寄存器快照、最终串口 JSON。测试统计/回显/CAN 自测均不进入最终固件；保留两个独立主机测试用于回归。
+## 约定
+
+- 每个文档区分**当前结论**与**历史测量**；历史数字原样引用，不重新解释。
+- 主机测试是 mock 环境：不验证中断抢占、USB 枚举和真实电机时序，不能替代板级验收。
+- DWT / ISR 测量含函数序言、尾声和统计指令的开销；`motor_work_max` 是采样链路墙钟跨度（含 SPI 等待与被抢占时间），
+  不是纯 CPU 占用，两者不可直接比较。
+- 未做示波器测量、未标定绝对电流/电压精度、未做带载长时间试验的结论，一律写为"未验证"。
