@@ -7,6 +7,7 @@
 static const uint8_t s_tx[6] = {0xa0, 0x03, 0, 0, 0, 0};
 static uint8_t s_rx[6];
 volatile float mt6835_angle_deg = NAN, mt6835_sample_delay;
+volatile float mt6835_raw_deg = NAN;
 volatile uint32_t mt6835_errors;
 volatile uint32_t mt6835_first_error; /* 1: busy, 2: DMA; otherwise raw angle/status/CRC bytes. */
 
@@ -84,10 +85,10 @@ void mt6835_finish(void)
         while ((DMA1_Stream0->CR | DMA1_Stream5->CR) & DMA_SxCR_EN) {}
         (void)SPI3->DR;
         (void)SPI3->SR;
-        mt6835_angle_deg = NAN;
+        mt6835_angle_deg = mt6835_raw_deg = NAN;
         if (!mt6835_first_error) mt6835_first_error = 2u;
     } else {
-        mt6835_angle_deg = mt6835_decode(s_rx);
+        mt6835_angle_deg = mt6835_raw_deg = mt6835_decode(s_rx);
     }
     if (isnan(mt6835_angle_deg)) {
         if (!mt6835_first_error) mt6835_first_error =

@@ -11,6 +11,9 @@ typedef struct {
 /* 20 kHz; nominal VDDA=3.3 V, shunt bias retained, no current calibration.
    Foreground code must briefly disable IRQs for a coherent snapshot. */
 extern volatile bsp_adc_sample_t adc_sample;
+/* Raw 12-bit codes behind adc_sample: B/C phase, then bus. Logged so a host can
+   re-derive currents once a reference measurement exists. */
+extern volatile uint16_t adc_raw_b, adc_raw_c, adc_raw_bus;
 extern volatile uint32_t adc_errors;
 #ifdef FOC_CAPTURE
 extern volatile uint16_t adc_debug[4]; /* B/C/bus raw codes and ADC-read entry CNT, not hold time. */

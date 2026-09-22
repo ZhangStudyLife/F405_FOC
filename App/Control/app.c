@@ -3,11 +3,23 @@
 #include "bsp_can.h"
 #include "bsp_motor.h"
 #include "bsp_uart.h"
+#include "bsp_usb.h"
+#include "control.h"
 #include "justfloat.h"
 #include "mt6835_port_stm32.h"
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define FOC_FRAME_CHANNELS 12u /* 2 header words plus 10 payload channels. */
+/* FOC_EDGE_LIMIT / 4200 from foc.c: sample-window ceiling on the vector span. */
+#define FOC_EDGE_FRACTION 0.1211428571f
+
+/* High-speed USB logging group, selected by `send X`; telemetry only. */
+static volatile uint8_t telemetry_group;
+/* One USB frame: two header words then the group payload, all float32. */
+static float s_usb_frame[FOC_FRAME_CHANNELS];
 
 static volatile uint32_t last_frame;
 static volatile uint8_t divider;
@@ -46,6 +58,81 @@ void app_fault(uint32_t fault)
 #endif
 }
 
+/* Same bit layout as the historical telemetry status word; it round-trips
+   exactly through the float32 channel, so no separate integer frame exists. */
+static uint32_t status_word(void)
+{
+    return foc.state | (foc.fault << 3) | ((uint32_t)motor_mode << 7);
+}
+
+/* 20 kHz USB logging: one group at a time, 12 float32 plus the JustFloat
+   terminator. Group 0 carries raw sensor truth, group 1 current-loop internals,
+   group 2 the applied voltage, group 3 the reference and mechanical response.
+   Channels that a host can reconstruct offline are deliberately absent. */
+static void telemetry_usb(void)
+{
+    union { float f; uint32_t u; } time, index;
+    time.u = (motor_sample_us & 0xffffffu) | (status_word() << 24);
+    index.u = ((sequence & 0xffffffu) | ((uint32_t)telemetry_group << 24));
+    float *payload = s_usb_frame;
+    payload[0] = time.f;
+    payload[1] = index.f;
+    switch (telemetry_group) {
+    default: /* Group 0: raw ADC codes, bus voltage, uncorrected encoder angle. */
+        payload[2] = (float)adc_raw_b;
+        payload[3] = (float)adc_raw_c;
+        payload[4] = (float)adc_raw_bus;
+        payload[5] = adc_sample.b_voltage;
+        payload[6] = adc_sample.c_voltage;
+        payload[7] = adc_sample.bus_voltage;
+        payload[8] = mt6835_raw_deg;
+        payload[9] = (float)motor_sample_us;
+        payload[10] = adc_sample.bus_voltage; /* Raw codes times the nominal gain. */
+        payload[11] = foc.b_offset;
+        break;
+    case 1: { /* Phase currents, electrical angle, PI state, pre-limit command. */
+        float integral_d, integral_q;
+        foc_integrators(&integral_d, &integral_q);
+        payload[2] = foc.zero_ready ? (adc_sample.b_voltage - foc.b_offset) * 50.0f : NAN;
+        payload[3] = foc.zero_ready ? (adc_sample.c_voltage - foc.c_offset) * 50.0f : NAN;
+        payload[4] = foc.electrical_deg;
+        payload[5] = foc.iq_ref;
+        payload[6] = integral_d;
+        payload[7] = integral_q;
+        payload[8] = foc.ud;
+        payload[9] = foc.uq;
+        payload[10] = foc.b_offset;
+        payload[11] = foc.c_offset;
+        break;
+    }
+    case 2: /* Applied voltage: the CCRs live for this period, and the limits. */
+        payload[2] = foc.ud;
+        payload[3] = foc.uq;
+        payload[4] = (float)(uint32_t)(foc.duty[0] * 4200.0f + 0.5f);
+        payload[5] = (float)(uint32_t)(foc.duty[1] * 4200.0f + 0.5f);
+        payload[6] = (float)(uint32_t)(foc.duty[2] * 4200.0f + 0.5f);
+        payload[7] = motor_duty[0];
+        payload[8] = motor_duty[1];
+        payload[9] = motor_duty[2];
+        payload[10] = FOC_EDGE_FRACTION * adc_sample.bus_voltage;
+        payload[11] = 0.5773502692f * adc_sample.bus_voltage;
+        break;
+    case 3: /* Reference chain and mechanical response. */
+        payload[2] = foc.iq_ref;
+        payload[3] = foc.command;
+        payload[4] = control_position_deg();
+        payload[5] = control_position_target();
+        payload[6] = control_speed_rpm();
+        payload[7] = foc.rpm;
+        payload[8] = control_speed_target();
+        payload[9] = control_iq_ref();
+        payload[10] = (float)control_mode();
+        payload[11] = adc_sample.bus_voltage;
+        break;
+    }
+    (void)bsp_usb_write(&s_usb_frame, sizeof s_usb_frame);
+}
+
 void app_sample(void)
 {
     unsigned sampled_mode = motor_mode, previous_state = foc.state;
@@ -67,14 +154,7 @@ void app_sample(void)
     else if (!bsp_motor_write(foc.duty, mode)) app_fault(FOC_TIMING);
     bsp_motor_unlock(key);
     sequence = (sequence + 1u) & 0xffffffu;
-    if (bsp_usb_ready()) {
-        /* Same 20 kHz sample, no averaging. Current gain matches foc_step().
-           Uq includes feedforward and voltage/modulation limiting. */
-        float ib = foc.zero_ready ? (adc_sample.b_voltage - foc.b_offset) * 50.0f : NAN;
-        float ic = foc.zero_ready ? (adc_sample.c_voltage - foc.c_offset) * 50.0f : NAN;
-        (void)usb_justfloat((float)motor_sample_us, foc.command, ib, ic,
-                           foc.id, foc.iq, foc.uq, mt6835_angle_deg);
-    }
+    if (bsp_usb_ready()) telemetry_usb(); /* Same 20 kHz sample, no averaging. */
 #ifdef FOC_CAPTURE
     if (capturing) {
         capture[capture_count++] = (capture_t){sequence,
@@ -99,7 +179,7 @@ void app_sample(void)
             const float frame[] = {foc.id, foc.iq, adc_sample.b_voltage, adc_sample.c_voltage,
                 (float)sequence, foc.rpm, adc_sample.bus_voltage, foc.iq_ref, foc.electrical_deg,
                 foc.ud, foc.uq, duty[0], duty[1], duty[2],
-                (float)(foc.state | (foc.fault << 3) | (motor_mode << 7)), INFINITY};
+                (float)status_word(), INFINITY};
             (void)bsp_uart_write(frame, sizeof frame);
             bsp_uart_tick(); /* Fixed sample phase, after ADC and PWM submission. */
         }
@@ -107,11 +187,32 @@ void app_sample(void)
     bsp_motor_sample_end();
 }
 
+/* Decimal only: optional sign, digits, optionally 1 or 2 decimals. Shared by
+   every numeric command so each one gets the same validation. */
+static bool parse_decimal(const char *p, float *value, float limit)
+{
+    const char *start = p;
+    if (*p == '-' || *p == '+') ++p;
+    if (*p < '0' || *p > '9') return false;
+    while (*p >= '0' && *p <= '9') ++p;
+    if (*p == '.') {
+        unsigned decimals = 0u;
+        while (*++p >= '0' && *p <= '9') ++decimals;
+        if (!decimals || decimals > 2u) return false;
+    }
+    if (*p) return false;
+    char *end;
+    float parsed = strtof(start, &end);
+    if (end != p || !isfinite(parsed) || fabsf(parsed) > limit) return false;
+    *value = parsed;
+    return true;
+}
+
 /* Foreground parser; only state changes use the short critical section. */
 bool app_command(const char *line)
 {
-    enum { STOP, RUN, CAL, CLEAR } command;
-    float amps = 0.0f;
+    enum { STOP, CAL, CLEAR, ZERO, TORQUE, SPEED, POS, HELLO } command;
+    float value = 0.0f;
 #ifdef FOC_CAPTURE
     if (!strcmp(line, "quiet 0") || !strcmp(line, "quiet 1")) {
         quiet = line[6] == '1'; return true;
@@ -139,34 +240,31 @@ bool app_command(const char *line)
     if (!strcmp(line, "stop")) command = STOP;
     else if (!strcmp(line, "cal")) command = CAL;
     else if (!strcmp(line, "clear")) command = CLEAR;
-    else if (!strncmp(line, "Iq ", 3u)) {
-        /* Decimal only: optional sign, digits, optionally 1 or 2 decimals. */
-        const char *p = line + 3;
-        if (*p == '-' || *p == '+') ++p;
-        if (*p < '0' || *p > '9') return false;
-        while (*p >= '0' && *p <= '9') ++p;
-        if (*p == '.') {
-            unsigned decimals = 0u;
-            while (*++p >= '0' && *p <= '9') ++decimals;
-            if (!decimals || decimals > 2u) return false;
-        }
-        if (*p) return false;
-        char *end;
-        amps = strtof(line + 3, &end);
-        if (end == line + 3 || *end || !isfinite(amps) || fabsf(amps) > 5.0f) return false;
-        command = RUN;
+    else if (!strcmp(line, "zero")) command = ZERO;
+    else if (!strcmp(line, "hello")) command = HELLO;
+    else if (!strncmp(line, "Iq ", 3u)) { command = TORQUE; if (!parse_decimal(line + 3, &value, FOC_CURRENT_MAX)) return false; }
+    else if (!strncmp(line, "rpm ", 4u)) { command = SPEED; if (!parse_decimal(line + 4, &value, FOC_SPEED_MAX)) return false; }
+    else if (!strncmp(line, "pos ", 4u)) { command = POS; if (!parse_decimal(line + 4, &value, 1e6f)) return false; }
+    else if (!strncmp(line, "send ", 5u) && line[5] >= '0' && line[5] <= '3' && !line[6]) {
+        telemetry_group = (uint8_t)(line[5] - '0');
+        return true;
     } else return false;
     uint32_t key = bsp_motor_lock();
     bool ok = true;
-    if (command == STOP) {
+    switch (command) {
+    case STOP:
 #ifdef FOC_CAPTURE
         capturing = capture_low = quiet = false;
 #endif
         bsp_motor_off(); foc_stop();
-    }
-    else if (command == RUN) ok = foc_current(amps);
-    else if (command == CAL) ok = foc_calibrate();
-    else {
+        break;
+    case TORQUE: ok = control_torque(value); break;
+    case SPEED: ok = control_speed(value); break;
+    case POS: ok = control_position(value); break;
+    case ZERO: ok = control_zero(); break;
+    case CAL: ok = foc_calibrate(); break;
+    case HELLO: break; /* No state change; the caller prints the banner. */
+    case CLEAR:
         ok = foc.state == FOC_FAULT && bsp_uart_millis() - last_frame < 2u && isfinite(mt6835_angle_deg) &&
              isfinite(adc_sample.b_voltage) && isfinite(adc_sample.c_voltage) &&
              isfinite(adc_sample.bus_voltage) && adc_sample.bus_voltage >= FOC_BUS_MIN && adc_sample.bus_voltage <= FOC_BUS_MAX &&
@@ -184,9 +282,18 @@ bool app_command(const char *line)
                 foc_stop(); /* Clear never restarts alignment or motor operation. */
             }
         }
+        break;
     }
     if (ok && foc.state == FOC_PRECHARGE) bsp_motor_arm();
     bsp_motor_unlock(key);
+    if (command == HELLO) {
+        /* Text goes to UART only: the USB link is a binary frame stream. */
+        char banner[24];
+        unsigned length = (unsigned)snprintf(banner, sizeof banner, "#FOC 1.1 %lu\r\n",
+                                             (unsigned long)status_word());
+        (void)bsp_uart_write(banner, length);
+        bsp_uart_tick();
+    }
     return ok;
 }
 
@@ -200,7 +307,8 @@ static void command_byte(command_line_t *rx, uint8_t ch)
 {
     if (ch == '\r' || ch == '\n') {
         rx->line[rx->length] = '\0';
-        if (rx->overflow || (rx->length && !app_command(rx->line))) ++app_command_rejected;
+        bool rejected = rx->overflow || (rx->length && !app_command(rx->line));
+        if (rejected) ++app_command_rejected;
         rx->length = 0u;
         rx->overflow = false;
     } else if (rx->length < sizeof rx->line - 1u && ch >= 32u && ch < 127u) {
