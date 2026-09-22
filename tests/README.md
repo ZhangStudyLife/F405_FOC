@@ -13,9 +13,14 @@ gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Hardware/mt6835 tests/test_mt6835_
 ./build/test_mt6835_crc.exe
 gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Protocols/JustFloat -I App/Hardware/bsp tests/test_justfloat.c -o build/test_justfloat.exe
 ./build/test_justfloat.exe
+gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Control -I App/FOC -I App/Protocols/JustFloat -I App/Hardware/bsp -I App/Hardware/mt6835 tests/test_app_usb.c App/Control/app.c App/FOC/foc.c -lm -o build/test_app_usb.exe
+./build/test_app_usb.exe
 ```
 
 均通过。编码器测试覆盖边界角度、独立逐位 CRC 参考、数据/CRC 任意单比特损坏、所有传感器故障状态、历史真实采样帧。JustFloat 覆盖精确帧字节、单次求值、16 通道上限、NaN 和发送拒绝。
+
+`test_app_usb.c` 针对当前电流模式：CR/LF/CRLF、拆包/粘包、UART/USB 独立组行、非法/超长行、
+会话切换、启动/停止语义，以及 20,000 帧电流环遥测的通道顺序/单位/时间戳回绕。
 
 ## 构建和最终固件
 

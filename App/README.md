@@ -6,7 +6,7 @@
 
 | 位置 | 职责 |
 |---|---|
-| `Control/app.c` | 初始化、串口命令、每 10 次编码器采样上传一次 |
+| `Control/app.c` | 初始化、串口命令、UART 2 kHz 和 USB 20 kHz 回传 |
 | `FOC/foc.c` | 零偏、ABC/dq、双 PI/抗饱和、预测角度、SVPWM、校准状态 |
 | `Hardware/bsp/bsp_motor.c` | TIM8 功率输出、谷底更新/超时关断、校准 Flash |
 | `Hardware/bsp/bsp_adc.c` | TIM8 采样触发、双 ADC 同步 DMA、电压换算 |
@@ -14,9 +14,15 @@
 | `Hardware/mt6835/mt6835_port_stm32.c` | 固定板级 SPI3/PA0 接线、DMA 启停 |
 | `Hardware/bsp/bsp_can.c` | CAN1 非阻塞收发和接收队列 |
 | `Hardware/bsp/bsp_uart.c` | UART DMA 发送、接收队列 |
+| `Hardware/bsp/bsp_usb.*` | 原生 USB CDC、整帧异步发送队列、接收背压 |
 | `Protocols/JustFloat/justfloat.h` | JustFloat 帧封装 |
 
 应用和协议不依赖 HAL；硬件驱动不调用应用。`Core/Src/main.c` 只调用 `app_init()`，主循环处理命令/校准保存后休眠；`stm32f4xx_it.c` 连接各驱动和应用回调。自写代码只使用生成文件的 USER CODE 块，其他代码保持 CubeMX 所有权。
+
+USB 端口置 DTR 后，每个采样回调通过 `usb_justfloat` 回传 8 通道：微秒时间戳、目标 Iq、Ib、Ic、Id、Iq、Uq、机械角，720 kB/s；
+UART 封装接口改名为 `uart_justfloat`。USB 需要 PC 持续接收，溢出会锁存；
+USB 支持 `Iq 0.20` / `stop` 加实际 CR、LF 或 CRLF，前台解析，不混入文本回显。
+通道单位、时间戳回绕和 VOFA 配置见 [USB_TEST.md](../tests/USB_TEST.md)。
 
 ## 采样链路
 
@@ -56,6 +62,7 @@ CAN1：PB8 RX / PB9 TX，1 Mbps、标准/扩展/远程帧；`bsp_can_send()` 提
 工程根目录执行 `cmake --preset Release`、`cmake --build --preset Release`。`../download/flash.py flash Release` 自动选择匹配 F405/1MB 的 ST-Link 并校验烧录。Debug 用于调试，实时性用 Release 测量。
 
 `.ioc` 提供基础外设/引脚初始化；最终 ADC 规则同步、TRGO 和 DMA 配置由 BSP 在启动时覆盖。重新生成不会改动 App，但必须保留 USER CODE。DMA2 Stream0、DMA1 Stream0/5 已由驱动占用，不能分配给其他设备。
+TIM5 由 `bsp_motor_init()` 配置为 1 MHz 自由运行计时，专用于 ADC DMA 入口的微秒时间戳；不能另作他用。
 
 本次电流验证见本地 `../build/foc_analysis/REPORT.md`；此前电压/采样固件历史结果见 `../tests/FOC_TEST.md` 与 `../tests/README.md`。旧测试入口、测速/EEPROM/多实例接口及通用 GPIO/SPI/时间包装已删除，HAL/CMSIS 原厂文件不做手工裁剪。
 

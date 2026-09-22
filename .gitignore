@@ -36,4 +36,4 @@ scope*.csv
 Thumbs.db
 Desktop.ini
 .DS_Store
-tools/__pycache__/
+__pycache__/
