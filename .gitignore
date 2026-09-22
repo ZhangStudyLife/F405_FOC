@@ -13,7 +13,8 @@ validation/
 *.ioc.bak
 
 # ---- 调试工具产物 ----
-# tools/scope_capture.py 的默认输出（波形图），每次抓取都会重新生成
+# tools/bench/ 是版本库内的台架工具；它默认把采集归档写到 %TEMP%\foc_bench，
+# 所以这里只需忽略早期脚本在本目录留下的波形输出
 scope.png
 scope*.csv
 

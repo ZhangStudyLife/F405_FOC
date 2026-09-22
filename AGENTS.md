@@ -4,12 +4,13 @@
 
 This is STM32F405 firmware written in C11. The current firmware target runs a 20 kHz encoder-sensed (MT6835 angle feedback) current-mode FOC loop with UART 2 kHz and USB 20 kHz JustFloat telemetry; see `App/README.md`.
 
-- `App/Control/`: application orchestration (`app.c`), command parsing and telemetry.
+- `App/Control/`: application orchestration (`app.c`), command parsing and telemetry; `control.c` holds the 1 kHz speed and position loops.
 - `App/Hardware/bsp/`: board peripherals; `App/Hardware/mt6835/`: encoder driver and STM32 adapter.
 - `App/Protocols/JustFloat/`: telemetry framing.
 - `Core/` and `Drivers/`: CubeMX-generated initialization, HAL, and CMSIS.
 - `cmake/`, `CMakePresets.json`, and `405_FOC.ioc`: build and peripheral configuration.
 - `tests/`: host C tests, PC-side validation scripts and hardware validation records (USB/UART/sampling/FOC); see `tests/README.md`. Hardware references include `硬件PCB拓扑.md`.
+- `tools/bench/`: PC bench automation, the 20 kHz frame parser, experiment library and archives; see `tools/bench/README.md`. Entry point is `../download/bench.cmd`.
 
 ## Build, Test, and Development Commands
 
