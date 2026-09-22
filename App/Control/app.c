@@ -29,7 +29,8 @@ volatile uint32_t app_command_rejected;
 
 bool app_init(void)
 {
-    if (!bsp_uart_init() || !bsp_can_init() || !mt6835_init()) return false;
+    if (!bsp_uart_init() || !bsp_can_init()) return false;
+    if (!mt6835_init()) { app_fault(FOC_SENSOR); return false; }
     foc_calibration_t calibration;
     foc_init(bsp_motor_load(&calibration) ? &calibration : NULL);
     bsp_adc_start();

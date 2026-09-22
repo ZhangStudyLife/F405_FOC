@@ -31,6 +31,7 @@
 /* USER CODE BEGIN Includes */
 #include "foc.h"
 #include "app.h"
+#include "bsp_usb.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -102,7 +103,11 @@ int main(void)
   MX_CAN1_Init();
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
-  if (!app_init()) Error_Handler();
+  if (!app_init()) {
+    app_fault(foc.fault ? foc.fault : FOC_TIMING);
+    /* Keep USB enumerable, but never start acquisition or accept motor commands. */
+    while (1) { bsp_usb_poll(); __WFI(); }
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
