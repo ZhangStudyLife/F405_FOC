@@ -150,6 +150,12 @@ SECTIONS
 
   _siccmram = LOADADDR(.ccmram);
 
+  /* USB FS uses CPU FIFO copies, so its queue can occupy CPU-only CCM. */
+  .usb_buffer (NOLOAD) : ALIGN(4)
+  {
+    *(.usb_buffer)
+  } >CCMRAM
+
   /* CCM-RAM section
   *
   * IMPORTANT NOTE!
