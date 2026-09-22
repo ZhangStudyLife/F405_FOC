@@ -3,6 +3,7 @@
 #include "bsp_can.h"
 #include "bsp_motor.h"
 #include "bsp_uart.h"
+#include "justfloat.h"
 #include "mt6835_port_stm32.h"
 #include <math.h>
 #include <stdlib.h>
@@ -65,6 +66,14 @@ void app_sample(void)
     else if (!bsp_motor_write(foc.duty, mode)) app_fault(FOC_TIMING);
     bsp_motor_unlock(key);
     sequence = (sequence + 1u) & 0xffffffu;
+    if (bsp_usb_ready()) {
+        /* Same 20 kHz sample, no averaging. Current gain matches foc_step().
+           Uq includes feedforward and voltage/modulation limiting. */
+        float ib = foc.zero_ready ? (adc_sample.b_voltage - foc.b_offset) * 50.0f : NAN;
+        float ic = foc.zero_ready ? (adc_sample.c_voltage - foc.c_offset) * 50.0f : NAN;
+        (void)usb_justfloat((float)motor_sample_us, foc.command, ib, ic,
+                           foc.id, foc.iq, foc.uq, mt6835_angle_deg);
+    }
 #ifdef FOC_CAPTURE
     if (capturing) {
         capture[capture_count++] = (capture_t){sequence,
@@ -180,16 +189,34 @@ bool app_command(const char *line)
     return ok;
 }
 
+typedef struct {
+    char line[32];
+    unsigned length;
+    bool overflow;
+} command_line_t;
+
+static void command_byte(command_line_t *rx, uint8_t ch)
+{
+    if (ch == '\r' || ch == '\n') {
+        rx->line[rx->length] = '\0';
+        if (rx->overflow || (rx->length && !app_command(rx->line))) ++app_command_rejected;
+        rx->length = 0u;
+        rx->overflow = false;
+    } else if (rx->length < sizeof rx->line - 1u && ch >= 32u && ch < 127u) {
+        rx->line[rx->length++] = (char)ch;
+    } else rx->overflow = true;
+}
+
 void app_poll(void)
 {
-    static char line[32];
-    static unsigned length;
-    static bool overflow;
+    bsp_usb_poll();
+    static command_line_t uart_rx, usb_rx;
+    static uint32_t usb_session;
     static uint32_t rx_errors;
     uint32_t errors = g_uart_stats.rx_errors + g_uart_stats.rx_lost;
     if (errors != rx_errors) {
         rx_errors = errors;
-        overflow = true; /* Discard the damaged command through its newline. */
+        uart_rx.overflow = true; /* Discard the damaged command through its terminator. */
         uint32_t key = bsp_motor_lock();
         if (foc.state == FOC_PRECHARGE || foc.state == FOC_CALIBRATE || foc.state == FOC_RUN)
             app_fault(FOC_UART);
@@ -197,14 +224,16 @@ void app_poll(void)
     }
     uint8_t ch;
     while (bsp_uart_read(&ch, 1u)) {
-        if (ch == '\r') continue;
-        if (ch == '\n') {
-            line[length] = '\0';
-            if (overflow || (length && !app_command(line))) ++app_command_rejected;
-            length = 0u; overflow = false;
-        } else if (length < sizeof line - 1u && ch >= 32u && ch < 127u) line[length++] = (char)ch;
-        else overflow = true;
+        command_byte(&uart_rx, ch);
     }
+    if (usb_session != g_usb_stats.sessions) {
+        usb_session = g_usb_stats.sessions;
+        usb_rx.length = 0u;
+        usb_rx.overflow = false; /* Never join a partial line across DTR sessions. */
+    }
+    uint8_t packet[64];
+    size_t received = bsp_usb_read(packet, sizeof packet);
+    for (size_t i = 0; i < received; ++i) command_byte(&usb_rx, packet[i]);
 #ifdef FOC_CAPTURE
     if (dumping) {
         /* At most one chunk/ms, below UART capacity. Normal telemetry is paused.

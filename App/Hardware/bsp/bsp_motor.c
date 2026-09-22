@@ -14,6 +14,7 @@ static volatile bool ready, inhibited;
 static uint32_t sample_start, last_sample;
 volatile float motor_duty[3];
 volatile uint32_t motor_cycles, motor_period_min = UINT32_MAX, motor_period_max, motor_work_max;
+volatile uint32_t motor_sample_us;
 volatile uint32_t motor_write_min = 4200u, motor_timing_fault;
 
 void bsp_motor_arm(void) { inhibited = false; }
@@ -43,6 +44,15 @@ void bsp_motor_init(void)
     motor_write_min = 4200u; motor_timing_fault = 0u;
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    /* APB1 timer clock is 84 MHz. TIM5 is dedicated to acquisition timestamps. */
+    __HAL_RCC_TIM5_CLK_ENABLE();
+    TIM5->CR1 = 0u;
+    TIM5->PSC = 83u;
+    TIM5->ARR = 0xffffffffu;
+    TIM5->EGR = TIM_EGR_UG;
+    TIM5->CNT = 0u;
+    DBGMCU->APB1FZ |= DBGMCU_APB1_FZ_DBG_TIM5_STOP;
+    TIM5->CR1 = TIM_CR1_CEN;
     /* UG loads RCR=1 at CNT=0: overflow counts down, underflow latches CCRs.
        Force CH4 low before toggle mode so rising trigger is on the up-count. */
     TIM8->CR1 = TIM_CR1_CMS_0 | TIM_CR1_ARPE;
@@ -119,6 +129,7 @@ bool bsp_motor_update(void)
 
 bool bsp_motor_sample_begin(void)
 {
+    motor_sample_us = TIM5->CNT & 0xffffffu;
     uint32_t now = DWT->CYCCNT;
     uint32_t period = now - last_sample;
     bool valid = !last_sample || (period >= 8000u && period <= 8800u);
