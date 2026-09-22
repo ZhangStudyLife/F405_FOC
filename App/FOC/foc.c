@@ -1,4 +1,6 @@
 #include "foc.h"
+#include "bsp_motor.h" /* motor_sample_us: the sample-phase timestamp. */
+#include "control.h"
 #include <math.h>
 #include <string.h>
 
@@ -7,7 +9,7 @@
 foc_t foc;
 static float previous, position, origin, forward, sum_sin, sum_cos, low, high;
 static uint32_t ticks;
-static float integral_d, integral_q, variance_b, variance_c;
+static float integral_d, integral_q, variance_b, variance_c, previous_command;
 static bool tracking, aligning;
 
 static void sincos_fast(float theta, float *s, float *c)
@@ -26,6 +28,12 @@ static void sincos_fast(float theta, float *s, float *c)
 float foc_wrap(float radians)
 {
     return radians - floorf(radians / TURN) * TURN;
+}
+
+void foc_integrators(float *d, float *q)
+{
+    *d = integral_d;
+    *q = integral_q;
 }
 
 float foc_modulate(float a, float beta, float bus_voltage, float duty[3])
@@ -70,7 +78,9 @@ void foc_stop(void)
     foc.command = foc.iq_ref = foc.ud = foc.uq = 0.0f;
     integral_d = integral_q = 0.0f;
     aligning = false;
+    previous_command = 0.0f; /* Cancel any in-flight command ramp. */
     foc.duty[0] = foc.duty[1] = foc.duty[2] = 0.0f;
+    control_stop();
     if (foc.state != FOC_FAULT) foc.state = foc.zero_ready ? FOC_IDLE : FOC_OFFSET;
 }
 
@@ -184,7 +194,20 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         foc.state = aligning ? FOC_CALIBRATE : FOC_RUN;
     }
     if (foc.state == FOC_RUN) {
-        foc.iq_ref = foc.command;
+        /* 1 A/s command ramp, slewed at the fixed 20 kHz control rate. */
+        float step = foc.command - previous_command;
+        if (step > 5e-5f) step = 5e-5f;
+        else if (step < -5e-5f) step = -5e-5f;
+        previous_command += step;
+        foc.iq_ref = previous_command;
+        /* The 1 kHz outer loop, when scheduled, replaces the reference. It only
+           produces a value on its own millisecond, so hold the torque reference
+           on the nineteen samples in between. */
+        uint32_t outer_fault = control_fault();
+        if (outer_fault) { foc_trip(outer_fault); return; }
+        control_step(motor_sample_us, position);
+        if (control_mode() != CONTROL_TORQUE && control_scheduled())
+            foc.iq_ref = control_iq_ref();
         /* 600 Hz PI, R=.12 ohm, L=50 uH; no feedback low-pass.
            Back calculation Tt=L/R. Feedforward uses nominal motor parameters. */
         float ed = -foc.id, eq = foc.iq_ref - foc.iq;

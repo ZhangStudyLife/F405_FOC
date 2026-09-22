@@ -11,6 +11,7 @@ add_executable(${CMAKE_PROJECT_NAME})
 add_subdirectory(cmake/stm32cubemx)
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/Control/app.c
+    App/Control/control.c
     App/FOC/foc.c
     App/Hardware/bsp/bsp_motor.c
     App/Hardware/bsp/bsp_adc.c
@@ -45,7 +46,7 @@ set_source_files_properties(
 # Keep the 20 kHz path optimized in Debug too; -O0 misses PWM deadlines.
 set_source_files_properties(
     App/FOC/foc.c App/Hardware/bsp/bsp_motor.c
-    App/Control/app.c App/Hardware/bsp/bsp_adc.c App/Hardware/bsp/bsp_uart.c
+    App/Control/app.c App/Control/control.c App/Hardware/bsp/bsp_adc.c App/Hardware/bsp/bsp_uart.c
     App/Hardware/mt6835/mt6835.c App/Hardware/mt6835/mt6835_port_stm32.c
     PROPERTIES COMPILE_OPTIONS "-O3")
 add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD

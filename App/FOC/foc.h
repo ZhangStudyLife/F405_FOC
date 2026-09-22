@@ -7,6 +7,7 @@
 #define FOC_BUS_MIN 8.0f
 #define FOC_BUS_MAX 36.0f
 #define FOC_SPEED_MAX 9400.0f /* 5010-KV360 rated maximum, RPM. */
+#define FOC_CURRENT_MAX 5.0f  /* Commandable Iq, A; also the outer-loop limit. */
 
 /* Nominal timing, pending scope validation of ADC/driver/analog delays. */
 #ifndef FOC_TRIGGER_TICKS
@@ -21,7 +22,8 @@
 
 enum { FOC_IDLE, FOC_PRECHARGE, FOC_CALIBRATE, FOC_SAVE, FOC_RUN, FOC_FAULT, FOC_OFFSET };
 enum { FOC_OK, FOC_SENSOR, FOC_ADC, FOC_TIMING, FOC_WINDOW, FOC_ALIGNMENT,
-       FOC_FLASH, FOC_UART, FOC_BUS, FOC_ZERO, FOC_CURRENT, FOC_SPEED };
+       FOC_FLASH, FOC_UART, FOC_BUS, FOC_ZERO, FOC_CURRENT, FOC_SPEED,
+       FOC_POSITION };
 typedef struct { float zero; int32_t direction; } foc_calibration_t;
 typedef struct {
     foc_calibration_t calibration;
@@ -41,6 +43,9 @@ void foc_trip(uint32_t fault);
    MT6835 internal measurement delay is not calibrated. */
 void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_voltage, float encoder_delay);
 float foc_wrap(float radians);
+/* PI integrator states, volts. Read-only telemetry for the current loop; they
+   are internal state a host cannot reconstruct from the other channels. */
+void foc_integrators(float *d, float *q);
 /* Returns applied vector scale for PI anti-windup; shifts common mode for ADC. */
 float foc_modulate(float alpha, float beta, float bus_voltage, float duty[3]);
 bool foc_window(const float duty[3]);

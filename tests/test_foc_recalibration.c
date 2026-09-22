@@ -1,10 +1,18 @@
+#include "bsp_uart.h"
 #include "foc.h"
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
 
+/* foc.c stamps the outer-loop scheduler from the sample-phase timestamp. */
+volatile uint32_t motor_sample_us;
+static uint32_t s_millis;
+uint32_t bsp_uart_millis(void) { return s_millis; }
+
 static void sample(float angle)
 {
+    motor_sample_us = (motor_sample_us + 50u) & 0xffffffu;
+    s_millis = motor_sample_us / 1000u;
     foc_step(angle, 20.0f, 1.66f, 1.68f, 3e-6f);
 }
 
