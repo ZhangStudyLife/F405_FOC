@@ -58,6 +58,7 @@ CMake，不参与 Debug/Release 构建。
 | [USB_TEST.md](USB_TEST.md) | USB FS CDC：36 字节 / 8 通道 20 kHz 布局、VOFA+ 设置、USB 命令、64 KB 队列与完整性边界、主机测试、短测/长测/CPU 插桩/UART 对比 |
 | [UART_TEST.md](UART_TEST.md) | USART2 2 Mbps：64 字节 / 15 float 2 kHz 布局、串口命令、驱动约束、波特率阶梯与长测、命令接收核验、Debug 实时路径修复 |
 | [SAMPLING_TEST.md](SAMPLING_TEST.md) | 采样链路：TIM8 + 双 ADC + SPI/DMA 调度、ADC 采样时间优化、20 kHz 周期与 CPU 口径、MT6835 编码器与故障注入 |
+| [CUBEMX_TEST.md](CUBEMX_TEST.md) | CubeMX 配置与 USB 集成：6.15.0 两次生成的工具/时钟/引脚设置、生成前后外设 SHA256 核对、USER CODE 保留、日志诊断分类、构建占用与未执行边界 |
 | [FOC_TEST.md](FOC_TEST.md) | 电机控制：2026-09-20 电压模式历史记录（命令、帧、校准、Flash 记录、实测），当前电流模式见 `App/README.md` |
 
 ## 原始记录位置（本机，不入版本库）
