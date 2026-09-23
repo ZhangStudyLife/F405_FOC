@@ -1,5 +1,4 @@
-/* Outer-loop regression against the measured 24 V no-load plant. Every long
-   run refreshes the target every 100 ms, as the host does for the watchdog. */
+/* Outer-loop regression against the measured 24 V no-load plant. */
 #include "bsp_uart.h"
 #include "control.h"
 #include "foc.h"
@@ -80,18 +79,10 @@ static void reset(void)
     assert(control_zero());
 }
 
-/* Mode commands are the host's keepalive: resent every 100 ms while running. */
 static void hold(unsigned milliseconds, float torque_scale)
 {
-    unsigned elapsed = 0u;
-    while (elapsed < milliseconds) {
-        assert(control_fault() == 0u);
-        if (control_mode() == CONTROL_SPEED) assert(control_speed(control_speed_target()));
-        else if (control_mode() == CONTROL_POSITION) assert(control_position(control_position_target()));
-        else assert(control_torque(foc.command));
-        run(100u, torque_scale);
-        elapsed += 100u;
-    }
+    run(milliseconds, torque_scale);
+    assert(control_fault() == 0u);
 }
 
 int main(void)
@@ -106,7 +97,14 @@ int main(void)
     reset();
     assert(control_speed(1000.0f));
     assert(foc.state == FOC_PRECHARGE && control_mode() == CONTROL_SPEED);
-    hold(3000u, 1.0f);
+    float prior_speed = control_speed_target(), prior_accel = 0.0f;
+    for (unsigned n = 0; n < 3000u; ++n) {
+        hold(1u, 1.0f);
+        float accel = (control_speed_target() - prior_speed) * 1000.0f;
+        assert(fabsf(accel) <= 50010.0f);
+        if (n) assert(fabsf(accel - prior_accel) <= 510.0f);
+        prior_speed = control_speed_target(); prior_accel = accel;
+    }
     assert(fabsf(control_speed_rpm() - 1000.0f) < 60.0f);
     assert(fabsf(control_iq_ref()) <= FOC_CURRENT_MAX);
     printf("speed: target 1000, measured %.1f RPM, iq %.3f A\n",
@@ -128,15 +126,18 @@ int main(void)
     assert(foc.state == FOC_RUN && control_fault() == 0u);
     printf("limit: saturated at %.3f A with an immovable plant\n", (double)control_iq_ref());
 
-    /* --- Host watchdog: a held reference demands a live command stream. --- */
+    /* --- Speed and position hold their last target without host refresh. --- */
     reset();
     assert(control_speed(500.0f));
-    run(180u, 0.0f);
+    run(400u, 0.0f);
     assert(control_scheduled() && control_fault() == 0u);
-    run(40u, 0.0f); /* 220 ms since the last command. */
-    assert(control_fault() == FOC_UART);
-    printf("watchdog: tripped with FOC_UART after 220 ms of silence\n");
-    /* Torque mode keeps the historical `Iq` semantics and has no watchdog. */
+    assert(foc.state == FOC_RUN && control_speed_target() == 500.0f);
+    reset();
+    assert(control_position(720.0f));
+    run(400u, 0.0f);
+    assert(control_scheduled() && control_fault() == 0u);
+    assert(foc.state == FOC_RUN && control_position_target() == 720.0f);
+    /* Torque mode keeps the historical `Iq` semantics. */
     reset();
     assert(control_torque(0.5f));
     run(400u, 0.0f);
@@ -194,6 +195,18 @@ int main(void)
     assert(fabsf(control_position_deg() - before_coast - 10000.0f) < 1.0f);
     assert(fabsf(control_speed_rpm()) < 100.0f);
     assert(fabsf(control_iq_ref()) < 1.0f);
-    puts("PASS: speed tracking, output limit, host watchdog, position convergence, zero, stop");
+    /* Fast jerk-limited travel and a new target while already moving. */
+    reset();
+    assert(control_motion(7000.0f, 50000.0f, 500000.0f));
+    assert(control_position(3600.0f));
+    run(200u, 1.0f);
+    float previous_target = control_speed_target();
+    assert(control_position(-3600.0f));
+    run(1u, 1.0f);
+    assert(fabsf(control_speed_target() - previous_target) < 20.0f);
+    hold(3000u, 1.0f);
+    assert(fabsf(plant_position + 3600.0f) < 2.0f);
+    assert(fabsf(control_speed_rpm()) < 5.0f);
+    puts("PASS: speed tracking, output limit, held targets, position convergence, zero, stop");
     return 0;
 }

@@ -1,7 +1,7 @@
 @echo off
 rem ============================================================
 rem  405_FOC  PC bench entry point (motor test automation)
-rem  Double-click  = run the case library on all four groups
+rem  Double-click  = Chinese interactive menu
 rem  Terminal use  = bench.cmd list | discover
 rem                  bench.cmd run [--mode torque|speed|position|all]
 rem                               [--dry-run] [--yes] [--groups 0,1,2,3]
@@ -14,11 +14,7 @@ rem  get garbled and can break the script body.
 rem ============================================================
 chcp 65001 >nul
 set PYTHONUTF8=1
-if "%~1"=="" (
-    python "%~dp0..\tools\bench\bench.py" run
-) else (
-    python "%~dp0..\tools\bench\bench.py" %*
-)
+python "%~dp0..\tools\bench\bench.py" %*
 set "result=%errorlevel%"
 if not "%result%"=="0" pause
 if "%~1"=="" pause

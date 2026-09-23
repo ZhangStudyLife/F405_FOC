@@ -1,5 +1,6 @@
 #include "bsp_usb.h"
 #include "usbd_cdc_if.h"
+#include "usbd_core.h"
 #include <string.h>
 
 /* CPU-only OTG FS can read CCM; leave DMA-accessible SRAM to acquisition.
@@ -52,7 +53,7 @@ static void transmit(void)
     if (size < 4096u && now - s_sent_at < 10u && !g_usb_stats.overflow) return;
     uint32_t offset = s_tail & (sizeof s_tx - 1u);
     if (size > sizeof s_tx - offset) size = sizeof s_tx - offset;
-    if (size > 4096u) size = 4096u;
+    if (size > 16384u) size = 16384u;
     /* Keep full USB packets while streaming; the 10 ms flush sends the remainder. */
     if (size >= 64u) size &= ~63u;
     s_sending = size;
@@ -95,7 +96,16 @@ void bsp_usb_reset(void)
 void bsp_usb_control(bool open)
 {
     if (open && !s_open) ++g_usb_stats.sessions;
-    if (!open && s_open) ++g_usb_stats.interruptions;
+    if (!open && s_open) {
+        s_open = false;
+        ++g_usb_stats.interruptions;
+        (void)USBD_LL_FlushEP(&hUsbDeviceFS, CDC_IN_EP);
+        ((USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData)->TxState = 0u;
+        g_usb_stats.tx_discarded += s_head - s_tail;
+        s_head = s_tail = s_sending = 0u;
+        g_usb_stats.overflow = false; /* A new DTR session gets a fresh stream. */
+        return;
+    }
     s_open = open;
 }
 

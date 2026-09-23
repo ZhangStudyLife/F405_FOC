@@ -11,6 +11,7 @@ enum { CONTROL_TORQUE, CONTROL_SPEED, CONTROL_POSITION };
 bool control_torque(float amps);      /* Target Iq, amps. */
 bool control_speed(float rpm);        /* Target speed, RPM, signed. */
 bool control_position(float deg);     /* Target position, mechanical degrees, multi-turn. */
+bool control_motion(float rpm, float acceleration, float jerk);
 bool control_hold_position(void);     /* Re-target the last position, still scheduled. */
 bool control_zero(void);              /* Redefine the current position as 0 deg. */
 void control_stop(void);              /* stop/trip: torque mode, cleared integrators. */
@@ -21,7 +22,7 @@ void control_step(uint32_t sample_us, float mechanical_deg);
 
 /* Latched reason to trip the FOC state machine; read once per 20 kHz cycle. */
 uint32_t control_fault(void);
-bool control_scheduled(void);         /* Target was received recently enough to keep running. */
+bool control_scheduled(void);         /* Target stays active until stop/trip. */
 uint32_t control_mode(void);          /* enum above; 0 means the current loop holds iq_ref. */
 float control_iq_ref(void);           /* Speed/position output, amps. */
 float control_speed_rpm(void);        /* Measured, from position difference over 1 ms. */

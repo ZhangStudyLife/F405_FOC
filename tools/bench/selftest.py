@@ -78,14 +78,18 @@ def main():
     assert flags["gaps"] == 1 and flags["missing"] == 1 and not flags["seq_ok"]
     assert flags["max_gap_us"] == 100
 
-    # 6. A train of frames whose terminators are missing is refused, not parroted.
+    # 6. A torn tail is counted, and a byte loss inside the stream is resynced.
     with open(path, "wb") as handle:
         handle.write(blob + b"\x11" * bench.FRAME_BYTES)
-    try:
-        bench.parse_file(path)
-        raise AssertionError("unframed tail accepted")
-    except ValueError:
-        pass
+    table, dropped, words = bench.parse_file(path)
+    assert len(table) == count and dropped == bench.FRAME_BYTES
+    assert bench.continuity(words, 3)["gaps"] == 0
+    with open(path, "wb") as handle:
+        handle.write(blob[:200 * 52 + 48] + blob[201 * 52 + 8:])
+    table, dropped, words = bench.parse_file(path)
+    assert len(table) == count - 2 and dropped == 92
+    flags = bench.continuity(words, 3)
+    assert flags["gaps"] == 1 and flags["missing"] == 2
 
     # 6b. A torn head is resynchronised rather than shifting every channel.
     with open(path, "wb") as handle:
@@ -112,6 +116,16 @@ def main():
     assert loaded_meta["continuity"]["gaps"] == 0
     stats = bench.summarise(loaded, loaded_meta)
     assert stats["frames"] == count and stats["faults"] == 0
+    stage = os.path.join(directory, "new_segment")
+    os.mkdir(stage)
+    new_raw = os.path.join(stage, "frames.f32")
+    with open(new_raw, "wb") as handle:
+        handle.write(blob)
+    new_meta = dict(meta, columns=bench.COLUMNS[3], schema=2)
+    new_target = bench.archive(new_raw, os.path.join(directory, "case_g3.7z"), new_meta)
+    assert not os.path.exists(stage)
+    new_table, new_loaded = bench.load(new_target)
+    assert new_table.shape == loaded.shape and new_loaded["continuity"]["gaps"] == 0
 
     # 8. The command-plan validator refuses anything outside the envelope.
     import bench as driver

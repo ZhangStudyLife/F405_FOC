@@ -1,36 +1,27 @@
-"""Motor bench driver: one command line, deterministic conditions, saved data.
-
-    bench.py list                       enumerate serial ports
-    bench.py discover                   probe the board and check the frame layout
-    bench.py run --mode torque|speed|position|all [--sweep]
-    bench.py report <run-directory>
-    bench.py chain <run-directory> <case>  compare independent repeats by capture index
-
-Every case is one file per logging group: ``out/<stamp>/<case>_g<N>_r<M>.zip``
-holding ``frames.f32`` and ``meta.json``. The same case repeated on groups 0..3
-runs the same command timeline for repeatability comparison.
-"""
+"""F405 电机台架：中文菜单、可复现工况、20 kHz 分组归档。"""
 import argparse
+import hashlib
 import json
 import math
 import os
+import shutil
+import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass, field
 
 import numpy as np
 
 import benchlib as bench
+import devices
 
 # Safety envelope. The board has no throttle of its own for these modes, so the
 # host is the last line of defence; widen these only on purpose.
-DEFAULT_IQ_LIMIT = 0.4      # A, provisional: the current gain is uncalibrated.
-DEFAULT_RPM_LIMIT = 1000.0  # RPM. The motor rating is 9400; start far below.
-DEFAULT_POS_LIMIT = 1200.0  # degrees of absolute target, enough for three turns.
-RAMP_RATE = 1.0             # A/s of the firmware's Iq reference slew.
+DEFAULT_IQ_LIMIT = 5.0
+DEFAULT_RPM_LIMIT = 7000.0
+DEFAULT_POS_LIMIT = 21600.0
+RAMP_RATE = 10.0
 WARMUP_MS = 300             # settle before the plan starts; 300 samples of 1 ms.
-KEEPALIVE_MS = 100          # must stay below the firmware's 200 ms watchdog.
 
 
 @dataclass
@@ -43,10 +34,15 @@ class Experiment:
     plan: list = field(default_factory=list)  # [(t_ms, "Iq 0.20"), ...]
     targets: dict = field(default_factory=dict)
     note: str = ""
+    setup: list = field(default_factory=list)
+    initial_rpm: float = 0.0
+    stop_at_rpm: float = 0.0
 
     def check(self, iq_limit, rpm_limit, pos_limit):
         """Reject a plan that leaves the safe envelope before it is ever sent."""
-        for _, command in self.plan:
+        for _, command in self.plan + [(0, command) for command in self.setup]:
+            if not command.startswith(("Iq ", "rpm ", "pos ")):
+                continue
             value = float(command.split()[1])
             if command.startswith("Iq ") and abs(value) > iq_limit:
                 return f"{self.case}: Iq {value} exceeds the {iq_limit} A limit"
@@ -61,234 +57,292 @@ class Experiment:
 
 # ---------------------------------------------------------------- case library
 
-def torque_cases(amp_steps=5, rate_steps=3, per_cel=3.0):
-    """Torque: fixed loads, steps, ramps, impulses, sinusoids, chirps, sign
-    reversal, and a dynamic high-speed/low-torque operating point."""
+def wave_plan(command, points):
+    return [(int(t * 1000), f"{command} {value:.2f}") for t, value in points]
+
+
+def torque_cases(volts=24.0):
+    """Separate stationary breakaway from the moving-rotor identification."""
     cases = []
-    amps = [round(0.05 + 0.35 * n / max(1, amp_steps - 1), 3) for n in range(amp_steps)]
-    rates = [0.5, 2.0, 10.0][:rate_steps]
-    for a in amps:
-        for sign in (1, -1):
-            tag = "pos" if sign > 0 else "neg"
-            cases.append(Experiment(f"const_{tag}_{a:.2f}", "torque", 1.5 + per_cel,
-                                    [(0, f"Iq {sign * a:.2f}")],
-                                    {"iq": sign * a}, "static torque"))
-            level = sign * amps[-1]
-            cases.append(Experiment(f"step_{tag}_{a:.2f}", "torque", 0.4 + per_cel,
-                                    [(0, "Iq 0.00"), (300, f"Iq {level:.2f}")],
-                                    {"iq": level}, "reference step"))
-            cases.append(Experiment(f"impulse_{tag}_{a:.2f}", "torque", 1.0 + per_cel,
-                                    [(0, "Iq 0.00"), (300, f"Iq {level:.2f}"),
-                                     (300 + max(20, int(per_cel * 200)), "Iq 0.00")],
-                                    {"iq": level}, "short torque pulse"))
-        for rate in rates:
-            span = a / rate * 1000.0
-            steps = max(2, int(span / 20.0))
-            plan = [(int(n * span / steps), f"Iq {a * n / steps:.2f}") for n in range(steps + 1)]
-            plan += [(int(span + 300 + n * span / steps), f"Iq {a * (1.0 - n / steps):.2f}")
-                     for n in range(steps + 1)]
-            cases.append(Experiment(f"ramp_{a:.2f}_{rate:g}", "torque",
-                                    math.ceil((2 * span + 300) / 1000.0) + per_cel,
-                                    plan, {"iq": a, "rate_a_per_s": rate}, "triangular ramp"))
-    for freq in (0.2, 1.0, 2.0, 5.0, 10.0):
-        duration = 1.0 + per_cel
-        plan = []
-        for n in range(int(duration * 1000.0 / 20.0)):
-            t = n * 20.0
-            value = amps[-1] * math.sin(2 * math.pi * freq * t / 1000.0)
-            plan.append((int(t), f"Iq {value:.2f}"))
-        cases.append(Experiment(f"sin_{freq:g}", "torque", duration, plan,
-                                {"iq": amps[-1], "freq_hz": freq}, "sine torque"))
-    duration = 1.0 + per_cel
-    plan = []
-    for n in range(int(duration * 1000.0 / 20.0)):
-        t = n * 20.0 / 1000.0
-        f0, f1 = 0.1, 50.0
-        phase = 2 * math.pi * (f0 * t + (f1 - f0) * t * t / (2 * duration))
-        plan.append((int(n * 20.0), f"Iq {amps[-1] * math.sin(phase):.2f}"))
-    cases.append(Experiment("chirp_0p1_50", "torque", duration, plan,
-                            {"iq": amps[-1], "f0": 0.1, "f1": 50.0}, "linear chirp"))
-    period = 1000.0
-    duration = 1.0 + per_cel
-    plan = [(int(n * 20.0), f"Iq {amps[-1] * 0.6 * (1 if (n * 20.0 % period) < period / 2 else -1):.2f}")
-            for n in range(int(duration * 1000.0 / 20.0))]
-    cases.append(Experiment("sign_reverse", "torque", duration, plan,
-                            {"iq": amps[-1] * 0.6, "period_ms": period}, "sign reversal"))
+    for sign in (1, -1):
+        direction = "正" if sign > 0 else "负"
+        ramp = [(n * 100, f"Iq {sign * n / 10:.2f}") for n in range(51)]
+        cases.append(Experiment(f"breakaway_{'p' if sign > 0 else 'n'}", "torque", 5.2,
+                                ramp, {"max_iq": sign * 5.0}, f"{direction}向静止起动阈值",
+                                stop_at_rpm=25.0))
+    for initial in (-1000, -250, 250, 1000):
+        for amps in (-5.0, -2.0, -1.0, -.5, -.25, .25, .5, 1.0, 2.0, 5.0):
+            cases.append(Experiment(f"moving_{initial:+d}_{amps:+.2f}", "torque", 2.6,
+                                    [(0, f"Iq {amps:.2f}"), (600, "stop")],
+                                    {"initial_rpm": initial, "iq": amps}, "带初速力矩与滑行",
+                                    initial_rpm=initial))
+    for initial in (-4000, -1000, -250, 250, 1000, 4000):
+        cases.append(Experiment(f"coast_{initial:+d}", "torque", 3.0, [(0, "stop")],
+                                {"initial_rpm": initial}, "断电滑行", initial_rpm=initial))
+    for frequency in (.2, .5, 1.0):
+        points = [(n * .02, .5 * math.sin(2 * math.pi * frequency * n * .02))
+                  for n in range(int(6 / .02))]
+        cases.append(Experiment(f"torque_sine_{frequency:g}", "torque", 6.0,
+                                wave_plan("Iq", points), {"amplitude_a": .5, "frequency_hz": frequency},
+                                "旋转中正弦力矩", initial_rpm=250))
+    cases.append(Experiment("torque_square", "torque", 6.0,
+                            wave_plan("Iq", [(n * .5, .5 if n % 2 == 0 else -.5) for n in range(12)]),
+                            {"amplitude_a": .5}, "旋转中正反方波", initial_rpm=250))
     return cases
 
 
-def speed_cases(amp_steps=5, rate_steps=3, per_cel=3.0):
-    """Speed: fixed points, steps, cross-zero, ramps, sinusoids, square, chirp."""
+SPEED_POINTS = (1, 5, 25, 100, 250, 500, 1000, 2000, 4000, 6000, 7000)
+
+
+def speed_cases(volts=24.0):
     cases = []
-    rpms = [round(50 + 950 * n / max(1, amp_steps - 1)) for n in range(amp_steps)]
-    rates = [100.0, 500.0, 2000.0][:rate_steps]
-    for r in rpms:
-        for sign in (1, -1):
-            tag = "pos" if sign > 0 else "neg"
-            cases.append(Experiment(f"const_{tag}_{r}", "speed", 0.5 + per_cel,
-                                    [(0, f"rpm {sign * r}")],
-                                    {"rpm": sign * r}, "constant speed"))
-    level = rpms[-1]
-    cases.append(Experiment("step_up", "speed", 0.5 + per_cel,
-                            [(0, "rpm 0"), (300, f"rpm {level}")],
-                            {"rpm": level}, "step from standstill"))
-    cases.append(Experiment("step_zero_cross", "speed", 0.5 + 2 * per_cel,
-                            [(0, f"rpm {level // 2}"), (300 + per_cel * 1000,
-                                                        f"rpm {-level // 2}")],
-                            {"rpm": f"+/-{level // 2}"}, "step across zero"))
-    for rate in rates:
-        span = level / rate * 1000.0
-        steps = max(2, int(span / 20.0))
-        plan = [(int(n * span / steps), f"rpm {level * n / steps:.1f}") for n in range(steps + 1)]
-        plan += [(int(span + 300 + n * span / steps), f"rpm {level * (1.0 - n / steps):.1f}")
-                 for n in range(steps + 1)]
-        cases.append(Experiment(f"ramp_{rate:g}", "speed",
-                                math.ceil((2 * span + 300) / 1000.0) + per_cel, plan,
-                                {"rpm": level, "rate_rpm_per_s": rate}, "speed ramp"))
-    for freq in (0.2, 1.0, 2.0, 5.0):
-        duration = 1.0 + per_cel
-        amplitude = level / 3.0
-        plan = [(int(n * 20.0), f"rpm {amplitude * math.sin(2 * math.pi * freq * n * 20.0 / 1e3):.1f}")
-                for n in range(int(duration * 1000.0 / 20.0))]
-        cases.append(Experiment(f"sin_{freq:g}", "speed", duration, plan,
-                                {"rpm": amplitude, "freq_hz": freq}, "sine speed"))
-    duration = 1.0 + per_cel
-    plan = [(int(n * 20.0), f"rpm {level / 3.0 * (1 if (n * 20.0 % 500.0) < 250.0 else -1):.1f}")
-            for n in range(int(duration * 1000.0 / 20.0))]
-    cases.append(Experiment("square", "speed", duration, plan,
-                            {"rpm": level / 3.0, "period_ms": 500.0}, "square speed"))
+    plan, cursor = [(0, "rpm 0")], .5
+    for sign in (1, -1):
+        for rpm in SPEED_POINTS:
+            plan.append((int(cursor * 1000), f"rpm {sign * rpm}"))
+            cursor += .8 if volts < 24 and rpm > 360 * volts * .9 else 1.5
+        plan.append((int(cursor * 1000), "rpm 0"))
+        cursor += 1.0
+    cases.append(Experiment("speed_atlas", "speed", cursor + .3, plan,
+                            {"points_rpm": list(SPEED_POINTS)}, "正负恒速、起步、跨零、停车"))
+    cases.append(Experiment("speed_cross_zero", "speed", 8.0,
+                            [(0, "rpm 0"), (500, "rpm 1000"), (3000, "rpm -2000"), (6000, "rpm 0")],
+                            {"sequence": [0, 1000, -2000, 0]}, "跨零阶跃"))
+    for rpm in (1, 5, 25):
+        cases.append(Experiment(f"one_turn_{rpm}", "speed", 1.0 + 60.0 / rpm,
+                                [(0, f"rpm {rpm}"), (int(60000 / rpm), "rpm 0")],
+                                {"rpm": rpm, "revolutions": 1}, "低速整圈"))
+    for rate in (250, 1000, 5000):
+        points = [(n * .02, min(1000, rate * n * .02))
+                  for n in range(int(1000 / rate / .02) + 1)]
+        cases.append(Experiment(f"speed_ramp_{rate}", "speed", 1000 / rate + 2.0,
+                                wave_plan("rpm", points), {"rate_rpm_s": rate}, "匀加速斜坡"))
+    for frequency in (.2, .5, 1.0):
+        points = [(n * .02, 1000 * math.sin(2 * math.pi * frequency * n * .02))
+                  for n in range(int(6 / .02))]
+        cases.append(Experiment(f"speed_sine_{frequency:g}", "speed", 6.0,
+                                wave_plan("rpm", points), {"amplitude_rpm": 1000, "hz": frequency},
+                                "正弦速度"))
+    cases.append(Experiment("speed_square", "speed", 8.0,
+                            [(n * 1000, f"rpm {1000 if n % 2 == 0 else -1000}") for n in range(8)],
+                            {"amplitude_rpm": 1000}, "方波速度"))
+    points = []
+    for segment, (start, finish) in enumerate(((0, 1000), (1000, -2000), (-2000, 0))):
+        for n in range(101):
+            u = n / 100
+            points.append((segment * 2 + 2 * u, start + (finish - start) * (3*u*u - 2*u*u*u)))
+    cases.append(Experiment("speed_cubic", "speed", 6.5, wave_plan("rpm", points),
+                            {"sequence": [0, 1000, -2000, 0]}, "三次曲线速度"))
     return cases
 
 
-def position_cases(amp_steps=5, rate_steps=3, per_cel=3.0):
-    """Position: absolute steps, multi-turn moves, point-to-point, trapezoids,
-    sinusoids, and reversal symmetry."""
+MOTION_PRESETS = ((500, 5000, 50000), (3000, 20000, 200000), (7000, 50000, 500000))
+POSITION_SPANS = (30, 90, 180, 360, 720, 1800, 3600)
+
+
+def position_cases(volts=24.0):
     cases = []
-    spans = [90.0, 180.0, 360.0, 720.0, 1080.0]
-    spans = spans[:max(2, amp_steps)] if amp_steps <= 5 else spans
-    for span in spans:
-        for sign in (1, -1):
-            tag = "pos" if sign > 0 else "neg"
-            cases.append(Experiment(f"step_{tag}_{int(span)}", "position", 1.5 + per_cel,
-                                    [(0, f"pos {sign * span:.2f}")],
-                                    {"pos": sign * span}, "absolute step"))
-    cases.append(Experiment("p2p_360", "position", 1.0 + 3 * per_cel,
-                            [(0, "pos 0.00"), (500, "pos 360.00"),
-                             (500 + int(per_cel * 1000), "pos 0.00"),
-                             (500 + 2 * int(per_cel * 1000), "pos 360.00")],
-                            {"pos": "0..360"}, "point to point"))
-    cases.append(Experiment("p2p_720", "position", 1.0 + 3 * per_cel,
-                            [(0, "pos 0.00"), (500, "pos 720.00"),
-                             (500 + int(per_cel * 1000), "pos 0.00"),
-                             (500 + 2 * int(per_cel * 1000), "pos -720.00")],
-                            {"pos": "0..+/-720"}, "multi-turn point to point"))
-    sequence = [(0, "pos 0.00")]
-    for n, angle in enumerate((90.0, 180.0, 270.0, 360.0, 720.0, 360.0, 0.0)):
-        sequence.append((500 + n * 700, f"pos {angle:.2f}"))
-    cases.append(Experiment("multi_seg", "position", 1.0 + 7 * 0.7 + per_cel, sequence,
-                            {"pos": "0/90/180/270/360/720"}, "segmented multi-turn"))
-    for velocity in (60.0, 180.0, 360.0)[:max(1, rate_steps)]:
-        span = spans[2]
-        run_ms = span / velocity * 1000.0
-        plan = []
-        for n in range(int(run_ms / 20.0) + 1):  # up
-            plan.append((int(n * 20.0), f"pos {velocity * n * 20.0 / 1000.0:.2f}"))
-        for n in range(int(run_ms / 20.0) + 1):  # back down
-            plan.append((int(run_ms + n * 20.0), f"pos {span - velocity * n * 20.0 / 1000.0:.2f}"))
-        cases.append(Experiment(f"trap_v{int(velocity)}", "position",
-                                0.2 + (2 * run_ms) / 1000.0 + per_cel, plan,
-                                {"pos": span, "velocity_deg_per_s": velocity},
-                                "triangular position profile"))
-    for freq in (0.5, 1.0, 2.0, 5.0):
-        duration = 1.0 + per_cel
-        amplitude = 180.0
-        plan = [(int(n * 20.0),
-                 f"pos {amplitude * math.sin(2 * math.pi * freq * n * 20.0 / 1e3):.2f}")
-                for n in range(int(duration * 1000.0 / 20.0))]
-        cases.append(Experiment(f"sin_{freq:g}", "position", duration, plan,
-                                {"pos": amplitude, "freq_hz": freq}, "sine position"))
-    cases.append(Experiment("reversal_symmetry", "position", 1.0 + 2 * per_cel,
-                            [(0, "pos 0.00"), (500, "pos 360.00"),
-                             (500 + int(per_cel * 1000), "pos -360.00")],
-                            {"pos": "+/-360"}, "reversal symmetry"))
+    for index, (rpm, accel, jerk) in enumerate(MOTION_PRESETS, 1):
+        plan, cursor = [], .5
+        for span in POSITION_SPANS:
+            for target in (span, 0, -span, 0):
+                plan.append((int(cursor * 1000), f"pos {target}"))
+                cursor += max(.75, 2 * span / (rpm * 6) + .7)
+        cases.append(Experiment(f"position_profile_{index}", "position", cursor + .5,
+                                plan, {"spans_deg": list(POSITION_SPANS), "motion": (rpm, accel, jerk)},
+                                "多圈往返和中途重规划",
+                                setup=[f"motion {rpm} {accel} {jerk}"]))
+    rpm, accel, jerk = MOTION_PRESETS[-1]
+    cases.append(Experiment("position_long_60turn", "position", 18.0,
+                            [(0, "pos 21600"), (8000, "pos -21600"), (16000, "pos 0")],
+                            {"motion": (rpm, accel, jerk), "optional": True}, "高速长行程专项",
+                            setup=[f"motion {rpm} {accel} {jerk}"]))
     return cases
 
 
 MODES = {"torque": torque_cases, "speed": speed_cases, "position": position_cases}
+MODE_ZH = {"torque": "力矩", "speed": "速度", "position": "位置"}
 
 
 # ------------------------------------------------------------------ execution
 
-def run_case(link, out_dir, experiment, group, limits, repetitions=1):
-    """Capture one (case, group) pair on a temporary file and zip it."""
-    iq_limit, rpm_limit, pos_limit = limits
-    problem = experiment.check(iq_limit, rpm_limit, pos_limit)
+def wait_speed(link, monitor, target, timeout=8.0):
+    link.send(f"rpm {target:.2f}")
+    deadline = time.monotonic() + timeout
+    stable = None
+    while time.monotonic() < deadline:
+        sample = monitor.health()
+        if abs(sample["rpm"] - target) <= max(5.0, .1 * abs(target)):
+            stable = stable or time.monotonic()
+            if time.monotonic() - stable >= .2:
+                return
+        else:
+            stable = None
+        time.sleep(.02)
+    raise RuntimeError(f"预转速未达到 {target:g} rpm，动态辨识已跳过")
+
+
+def assess(table, meta):
+    if meta["group"] != 3 or meta["mode"] == "torque":
+        return "已采集"
+    target_column = 8 if meta["mode"] == "speed" else 5
+    actual_column = 6 if meta["mode"] == "speed" else 4
+    target = table[:, target_column]
+    actual = table[:, actual_column]
+    if len(table) < 10000:
+        return "数据不足"
+    failures = 0
+    evaluated = 0
+    limited = 0
+    changes = np.r_[0, np.where(np.abs(np.diff(target)) > .01)[0] + 1, len(target)]
+    for start, stop in zip(changes[:-1], changes[1:]):
+        wanted = float(target[start])
+        if (meta["mode"] == "speed" and meta.get("bus_set_v", 24) < 24 and
+                abs(wanted) > meta["bus_set_v"] * 360 * .9):
+            limited += 1
+            continue
+        if stop - start < 10000:
+            continue
+        evaluated += 1
+        if meta["mode"] == "speed":
+            if wanted == 0:
+                continue
+            error = abs(float(np.mean(actual[stop-10000:stop])) - wanted)
+            if error > (2.0 if abs(wanted) < 25 else abs(wanted) * .05):
+                failures += 1
+        else:
+            error = np.abs(actual[stop-10000:stop] - wanted)
+            rpm = np.abs(table[stop-10000:stop, 6])
+            if np.any(error > 2.0) or np.any(rpm > 5.0):
+                failures += 1
+    if failures:
+        return "跟踪失败"
+    if limited:
+        return "物理限幅响应"
+    return "通过" if evaluated else "已采集"
+
+
+def alignment(stage):
+    path = os.path.join(stage, "uart.jsonl")
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        samples = [json.loads(line) for line in handle]
+    if len(samples) < 2:
+        return None
+    first = samples[0]["seq"]
+    seq = np.array([(row["seq"] - first) & 0xffffff for row in samples], dtype=np.int64)
+    host = np.array([row["host_ns"] for row in samples], dtype=np.int64)
+    offsets = host - seq * 50000
+    anchor = int(np.median(offsets))
+    return {"first_uart_seq": first, "host_ns_at_first_seq": anchor,
+            "ns_per_sample": 50000, "uart_arrival_p95_ms":
+            round(float(np.percentile(np.abs(offsets - anchor), 95)) / 1e6, 3),
+            "psu_current_note": "约 2 Hz 母线电流趋势，不是相电流或高频测量"}
+
+
+def run_case(link, out_dir, experiment, group, limits, monitor, supply=None,
+             voltage=24.0, repeat=0, attempt=0, load=None):
+    problem = experiment.check(*limits)
     if problem:
-        raise SystemExit(f"SAFETY: {problem}")
-    results = []
-    for repeat in range(repetitions):
-        raw = os.path.join(out_dir, f"{experiment.case}_g{group}_r{repeat}.f32")
+        raise RuntimeError(problem)
+    started = time.monotonic()
+    name = f"{experiment.case}_{voltage:g}V_g{group}_r{repeat}_a{attempt}"
+    stage = os.path.join(out_dir, name)
+    os.makedirs(stage, exist_ok=False)
+    raw = os.path.join(stage, "frames.f32")
+    archive = os.path.join(out_dir, name + ".7z")
+    scheduler = bench.Scheduler(link)
+    error = None
+    capturing = False
+    try:
         link.open_session()
+        link.send("send 3")
+        link.listen(.15)
+        bench.wait_idle(link)
+        if experiment.mode == "position":
+            link.send("zero")
+            link.listen(.1)
+        for command in experiment.setup:
+            link.send(command)
+        if experiment.initial_rpm:
+            wait_speed(link, monitor, experiment.initial_rpm)
+        link.send(f"send {group}")
+        link.drain(.15)
+        monitor.start_log(os.path.join(stage, "uart.jsonl"))
+        if supply:
+            supply.start_log(os.path.join(stage, "power.jsonl"))
+        link.start_capture(raw)
+        capturing = True
+        time.sleep(WARMUP_MS / 1000)
+        def health():
+            link.health()
+            sample = monitor.health()
+            if supply:
+                supply.health()
+            if experiment.stop_at_rpm and abs(sample["rpm"]) >= experiment.stop_at_rpm:
+                return False
+        scheduler.run(experiment.plan, experiment.duration_s, health=health)
+        link.send("stop")
+        time.sleep(.2)
+    except Exception as exc:
+        error = str(exc)
+    finally:
         try:
-            # Deterministic pre-roll: identical starting state every repeat.
-            link.send("send 3")
-            link.listen(0.15)  # let the group change land
-            if not bench.wait_idle(link):
-                raise RuntimeError("motor did not become idle before the next case")
-            if experiment.mode == "position":
-                link.send("zero")  # the origin is the only stateful input
-                link.listen(0.1)
-            link.send(f"send {group}")
-            link.listen(0.15)
-            link.start_capture(raw)
-            time.sleep(WARMUP_MS / 1000.0)
-            scheduler = bench.Scheduler(link, keepalive_ms=KEEPALIVE_MS)
-            scheduler.run(experiment.plan, experiment.duration_s)
+            monitor.send("stop")
             link.send("stop")
-            time.sleep(0.2)  # let the coast-down tail into the file
-        finally:
-            path = link.stop_capture()
+        except (OSError, RuntimeError):
+            pass
+        if capturing:
+            link.stop_capture()
+        monitor.stop_log()
+        if supply:
+            supply.stop_log()
+        try:
             link.close_session()
-        meta = {
-            "case": experiment.case,
-            "mode": experiment.mode,
-            "group": group,
-            "group_name": bench.GROUP_NAMES[group],
-            "repeat": repeat,
-            "note": experiment.note,
-            "targets": experiment.targets,
-            "duration_s": experiment.duration_s,
-            "warmup_ms": WARMUP_MS,
-            "keepalive_ms": KEEPALIVE_MS,
-            "ramp_rate_a_per_s": RAMP_RATE,
-            "plan": [[int(t), c] for t, c in experiment.plan],
-            "command_jitter_ms": scheduler.jitter,
-            "raw_bytes": os.path.getsize(path),
-            "limits": {"iq": iq_limit, "rpm": rpm_limit, "pos": pos_limit},
-            "columns": bench.COLUMNS[group],
-            "archive": os.path.basename(path).replace(".f32", ".zip"),
-            "host": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "git": git_revision(),
-        }
-        target = os.path.join(out_dir, meta["archive"])
-        bench.archive(path, target, meta)
-        # Continuity is measured from the archive so a torn capture is caught now.
-        table, loaded = bench.load(target)
-        os.unlink(path)
-        loaded["continuity"]["path"] = target
-        results.append(loaded)
-        flags = loaded["continuity"]
-        if flags.get("faults"):
-            raise SystemExit(f"FAULT during {experiment.case} g{group}: "
-                             f"{flags['faults']} frames flagged; stopping the run")
-        if not flags.get("dt_ok", False):
-            raise SystemExit(f"SAFETY: {experiment.case} g{group} lost 20 kHz continuity "
-                             f"({flags.get('gaps')} gaps, max {flags.get('max_gap_us')} us); "
-                             f"stopping the run")
-        print(f"  {experiment.case:<22} g{group}  r{repeat}  "
-              f"{table.shape[0]:>9} frames  {loaded['raw_bytes'] / 1e6:6.2f} MB  "
-              f"{os.path.getsize(target) / 1e6:6.2f} MB zip")
-    return results
+        except (OSError, RuntimeError):
+            pass
+    if not os.path.exists(raw) or os.path.getsize(raw) < 104:
+        raise RuntimeError(error or "没有采到完整 USB 帧")
+    meta = {
+        "schema": 2, "case": experiment.case, "mode": experiment.mode,
+        "group": group, "group_name": bench.GROUP_NAMES[group], "repeat": repeat,
+        "attempt": attempt, "bus_set_v": voltage, "load": load or {"name": "空载"},
+        "note": experiment.note, "targets": experiment.targets,
+        "duration_s": experiment.duration_s, "elapsed_s": round(time.monotonic() - started, 3),
+        "warmup_ms": WARMUP_MS, "ramp_rate_a_per_s": RAMP_RATE,
+        "plan": [[int(t), c] for t, c in experiment.plan], "setup": experiment.setup,
+        "initial_rpm": experiment.initial_rpm, "sent": scheduler.sent,
+        "command_jitter_ms": scheduler.jitter, "raw_bytes": os.path.getsize(raw),
+        "limits": {"iq": limits[0], "rpm": limits[1], "pos": limits[2]},
+        "columns": bench.COLUMNS[group], "archive": os.path.basename(archive),
+        "host": time.strftime("%Y-%m-%d %H:%M:%S"), "git": git_revision(),
+        "firmware_sha256": firmware_hash(),
+        "control_params": {"speed_kp": .005, "speed_ki": .01, "position_kp": 4.0,
+                           "torque_ramp_a_s": 10.0, "foc_rpm_filter_alpha_20khz": .01},
+        "psu": {"model": supply.state.model, "serial": supply.state.serial_number} if supply else None,
+        "time_alignment": alignment(stage),
+        "error": error,
+    }
+    try:
+        _, _, words = bench.parse_file(raw)
+        meta["continuity"] = bench.continuity(words, group)
+    except ValueError as exc:
+        meta["continuity"] = {"error": str(exc)}
+        error = error or str(exc)
+        meta["error"] = error
+    bench.archive(raw, archive, meta)
+    table, loaded = bench.load(archive)
+    flags = loaded["continuity"]
+    if flags.get("faults") or not flags.get("dt_ok", False):
+        error = error or f"采样故障：丢帧 {flags.get('gaps')}，故障帧 {flags.get('faults')}"
+    result = assess(table, loaded) if not error else "故障"
+    print(f"  {MODE_ZH[experiment.mode]}/{experiment.case} 组{group} 第{repeat+1}轮 "
+          f"{len(table)}帧，原始 {meta['raw_bytes']/1e6:.2f} MB → "
+          f"{os.path.getsize(archive)/1e6:.2f} MB，耗时 {time.monotonic()-started:.2f} 秒，{result}")
+    if error:
+        raise RuntimeError(error)
+    return result
 
 
 def git_revision():
@@ -302,84 +356,270 @@ def git_revision():
         return None
 
 
-def command_run(args):
-    import benchlib as lib
-    modes = list(MODES) if args.mode == "all" else [args.mode]
-    limits = (args.iq_limit, args.rpm_limit, args.pos_limit)
-    cases = []
-    for mode in modes:
-        for experiment in MODES[mode](args.amp_steps, args.rate_steps, args.per_cel):
-            problem = experiment.check(*limits)
-            if problem:
-                print(f"SKIP {problem}")
-                continue
-            cases.append(experiment)
-    groups = [int(g) for g in args.groups.split(",")]
-    total = sum(experiment.duration_s + 1.2 for experiment in cases) * len(groups) * args.repeat
-    print(f"{len(cases)} cases x {len(groups)} groups x {args.repeat} repeats "
-          f"~ {total / 60:.1f} min")
-    if args.dry_run:
-        for experiment in cases:
-            print(f"  {experiment.mode:<8} {experiment.case:<22} {experiment.duration_s:5.1f}s "
-                  f"{len(experiment.plan):>5} commands  {experiment.note}")
-        return 0
-    if not args.yes:
-        if input("start? [y/N] ").strip().lower() != "y":
-            return 1
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    root = os.path.abspath(args.out)
-    out_dir = os.path.join(root, stamp)
-    os.makedirs(out_dir, exist_ok=True)
-    session = {
-        "started": stamp, "modes": modes, "groups": groups, "repeat": args.repeat,
-        "limits": {"iq": args.iq_limit, "rpm": args.rpm_limit, "pos": args.pos_limit},
-        "git": git_revision(), "cases": len(cases), "directory": out_dir,
-    }
-    with open(os.path.join(out_dir, "session.json"), "w", encoding="utf-8") as handle:
-        json.dump(session, handle, indent=2, ensure_ascii=False)
+def firmware_hash():
+    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..",
+                                 "build", "Release", "405_FOC.bin"))
+    if not os.path.isfile(path):
+        return None
+    with open(path, "rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
-    port = bench.find_port(args.sn)
-    print(f"port {port.device} sn={port.serial_number}")
-    link = bench.Link(port.device, port.serial_number)
-    completed = 0
-    try:
-        link.open_session()
-        link.send("stop")
-        link.listen(0.2)
-        for experiment in cases:
-            print(f"{experiment.mode}/{experiment.case} ({experiment.note})")
-            for group in groups:
-                run_case(link, out_dir, experiment, group, limits, args.repeat)
-            completed += 1
-    except KeyboardInterrupt:
-        print("\ninterrupted")
-    finally:
+
+def reset_board(args):
+    script = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "download", "flash.py"))
+    command = [sys.executable, script, "reset"]
+    if args.stlink_sn:
+        command += ["--sn=" + args.stlink_sn]
+    subprocess.run(command, check=True, timeout=30)
+    time.sleep(2)
+
+
+def select_supply(args):
+    if args.psu == "off":
+        return None
+    candidates = [args.psu] if args.psu else devices.ports({(0x2E3C, 0x5740)})
+    if not candidates:
+        return None
+    found = []
+    for port in candidates:
         try:
-            link.send("stop")
-            time.sleep(0.2)
-        finally:
+            found.append(devices.StudentPower(port))
+        except (OSError, RuntimeError):
+            pass
+    if len(found) == 1:
+        return found[0]
+    if len(found) > 1:
+        names = [f"{power.port.port} {power.state.model}" for power in found]
+        if args.yes:
+            for power in found:
+                power.close()
+            raise RuntimeError(f"多个学生电源 {names}，请指定 --psu")
+        print("检测到多个学生电源：" + ", ".join(names))
+        selected = input("请输入本次台架电源端口：").strip().upper()
+        chosen = next((power for power in found if power.port.port == selected), None)
+        for power in found:
+            if power is not chosen:
+                power.close()
+        return chosen
+    return None
+
+
+def preflight(link, monitor):
+    link.open_session()
+    try:
+        link.send("send 3")
+        link.listen(.15)
+        bench.wait_idle(link)
+        wait_speed(link, monitor, 250.0, timeout=8.0)
+        return True
+    finally:
+        monitor.send("stop")
+        link.send("stop")
+        link.close_session()
+
+
+def recover(link, monitor, supply, args, voltage, error):
+    print(f"故障：{error}；正在停机并尝试一次恢复")
+    try:
+        monitor.send("stop")
+    except Exception:
+        pass
+    try:
+        link.send("stop")
+    except Exception:
+        pass
+    if supply:
+        supply.output(False)
+        if supply.state.protection_status:
+            raise RuntimeError(f"电源保护未消失：{supply.state.protection_status}")
+    force_reset = any(word in str(error) for word in ("保护", "故障", "转速", "电源"))
+    if not force_reset:
+        try:
+            link.close_session()
+            link.open_session()
+            link.send("send 3")
+            if link.listen(.6):
+                link.close_session()
+                if supply:
+                    supply.configure(voltage, 5.0)
+                    supply.output(True)
+                return link
+        except Exception:
+            pass
+    link.close()
+    reset_board(args)
+    port = bench.find_port(args.sn)
+    fresh = bench.Link(port.device, port.serial_number)
+    fresh.open_session()
+    fresh.send("send 3")
+    if not fresh.listen(.6):
+        fresh.close()
+        raise RuntimeError("ST-Link 复位后 USB 仍无帧")
+    fresh.close_session()
+    if supply:
+        supply.configure(voltage, 5.0)
+        supply.output(True)
+    return fresh
+
+
+def command_run(args):
+    if not args.all and not args.mode and not args.case:
+        if args.dry_run:
+            args.all = True
+        else:
+            return menu(args)
+    modes = list(MODES) if args.all else ([args.mode] if args.mode else list(MODES))
+    voltages = (24.0, 18.0, 12.0) if args.all else tuple(float(v) for v in args.buses.split(","))
+    limits = (args.iq_limit, args.rpm_limit, args.pos_limit)
+    groups = [int(g) for g in args.groups.split(",")]
+    if any(g not in range(4) for g in groups) or args.repeat < 1:
+        raise RuntimeError("日志组只能为 0–3，重复次数至少为 1")
+    work = []
+    for voltage in voltages:
+        for mode in modes:
+            source = [args.custom_experiment] if getattr(args, "custom_experiment", None) else MODES[mode](voltage)
+            for experiment in source:
+                if experiment.mode != mode:
+                    continue
+                if experiment.targets.get("optional") and not args.include_long:
+                    continue
+                if args.case and experiment.case != args.case:
+                    continue
+                if experiment.check(*limits):
+                    continue
+                work.append((voltage, experiment))
+    if not work:
+        raise RuntimeError("没有匹配的工况；先用 run --all --dry-run 查看名称")
+    total = sum(case.duration_s + (5 if case.initial_rpm else 1.5) for _, case in work) * len(groups) * args.repeat
+    print(f"{len(work)} 个工况 × {len(groups)} 组 × {args.repeat} 次，预计约 {total/60:.1f} 分钟")
+    if args.dry_run:
+        for voltage, case in work:
+            print(f"  {voltage:g} V {MODE_ZH[case.mode]} {case.case} {case.duration_s:.1f} 秒 {case.note}")
+        return 0
+    if not args.yes and input("开始测试？输入 y 确认：").strip().lower() != "y":
+        return 1
+    root = os.path.abspath(args.out)
+    out_dir = os.path.join(root, time.strftime("%Y%m%d_%H%M%S"))
+    os.makedirs(out_dir, exist_ok=False)
+    session = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "directory": out_dir,
+               "groups": groups, "voltages": voltages, "git": git_revision(),
+               "load": {"name": args.load_name, "mass_g": args.load_mass_g,
+                        "stl": args.load_stl, "axis": args.load_axis}, "results": []}
+    def save():
+        with open(os.path.join(out_dir, "session.json"), "w", encoding="utf-8") as handle:
+            json.dump(session, handle, ensure_ascii=False, indent=2)
+    save()
+    supply = None
+    monitor = None
+    link = None
+    started = time.monotonic()
+    try:
+        supply = select_supply(args)
+        if not supply and len(voltages) > 1:
+            raise RuntimeError("多母线全量测试需要指定并连接学生电源")
+        monitor = devices.UartMonitor(args.uart)
+        port = bench.find_port(args.sn)
+        link = bench.Link(port.device, port.serial_number)
+        print(f"FOC {port.device}，CH340 {monitor.port.port}，电源 {supply.port.port if supply else '未连接'}")
+        current_voltage = None
+        rotation_ok = None
+        for voltage, experiment in work:
+            if voltage != current_voltage:
+                if supply:
+                    supply.output(False)
+                    supply.configure(voltage, 5.0)
+                    supply.output(True)
+                    time.sleep(.5)
+                    supply.health()
+                current_voltage = voltage
+                rotation_ok = None
+            if experiment.mode != "torque" or experiment.initial_rpm:
+                if rotation_ok is None:
+                    try:
+                        rotation_ok = preflight(link, monitor)
+                    except Exception as exc:
+                        rotation_ok = False
+                        print(f"起转自检失败：{exc}；本电压下动态、速度与位置工况跳过")
+                if not rotation_ok:
+                    session["results"].append({"voltage": voltage, "case": experiment.case,
+                                               "status": "未执行", "reason": "起转自检失败"})
+                    save()
+                    continue
+            for group in groups:
+                for repeat in range(args.repeat):
+                    for attempt in range(2):
+                        try:
+                            result = run_case(link, out_dir, experiment, group, limits, monitor,
+                                              supply, voltage, repeat, attempt, session["load"])
+                            session["results"].append({"voltage": voltage, "case": experiment.case,
+                                "group": group, "repeat": repeat, "status": result, "attempt": attempt})
+                            break
+                        except Exception as exc:
+                            session["results"].append({"voltage": voltage, "case": experiment.case,
+                                "group": group, "repeat": repeat, "status": "故障", "error": str(exc),
+                                "attempt": attempt})
+                            save()
+                            if attempt:
+                                raise
+                            link = recover(link, monitor, supply, args, voltage, exc)
+                    save()
+    except KeyboardInterrupt:
+        print("用户中止，正在停机")
+    finally:
+        if monitor:
+            try:
+                monitor.send("stop")
+            except Exception:
+                pass
+        if link:
+            try:
+                link.send("stop")
+            except Exception:
+                pass
             link.close()
-    session["completed_cases"] = completed
-    session["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    with open(os.path.join(out_dir, "session.json"), "w", encoding="utf-8") as handle:
-        json.dump(session, handle, indent=2, ensure_ascii=False)
-    print(f"{completed}/{len(cases)} cases in {out_dir}")
+        if supply:
+            try:
+                supply.output(False)
+            finally:
+                supply.close()
+        if monitor:
+            monitor.close()
+        session["elapsed_s"] = round(time.monotonic() - started, 2)
+        session["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        save()
+        print(f"全程耗时 {session['elapsed_s']:.2f} 秒；数据：{out_dir}")
     return 0
 
 
 def command_report(args):
-    files = sorted(f for f in os.listdir(args.directory) if f.endswith(".zip"))
+    files = sorted(f for f in os.listdir(args.directory) if f.endswith((".zip", ".7z")))
     if not files:
         raise SystemExit(f"no captures in {args.directory}")
     lines = [f"# 台架数据报告", "",
              f"- 目录：`{os.path.abspath(args.directory)}`",
              f"- 文件：{len(files)}", ""]
     rows = []
+    mechanics = {}
     for name in files:
         table, meta = bench.load(os.path.join(args.directory, name))
         stats = bench.summarise(table, meta)
         flags = meta.get("continuity", {})
         rows.append((meta["case"], meta["group"], stats, flags))
+        if (meta.get("group") == 3 and meta.get("mode") == "torque" and
+                meta.get("case", "").startswith(("moving_", "coast_")) and
+                not flags.get("gaps") and len(table) > 2000):
+            # Decimate to 200 Hz, smooth encoder speed, and differentiate over
+            # 50 ms. Static breakaway samples must never enter this fit.
+            rpm = table[::100, 6].astype(float)
+            iq = table[::100, 9].astype(float)
+            smooth = np.convolve(rpm, np.ones(9) / 9, mode="same")
+            omega = smooth[5:-5] * (math.pi / 30)
+            domega = (smooth[10:] - smooth[:-10]) * (math.pi / 30) / .05
+            current = iq[5:-5]
+            ok = (np.isfinite(omega) & np.isfinite(domega) & np.isfinite(current) &
+                  (np.abs(omega) > 25 * math.pi / 30) & (np.abs(omega) < 7000 * math.pi / 30))
+            bus = float(meta.get("bus_set_v", np.nanmedian(table[::100, 11])))
+            mechanics.setdefault(bus, []).append((current[ok], omega[ok], domega[ok]))
         print(f"{name}: {stats['frames']} frames, {stats['seconds']} s")
     lines += ["## 连续性", "",
               "| 文件 | 帧数 | 秒 | 丢帧 | 最大间隔 us | 序号连续 | 故障帧 |",
@@ -398,6 +638,24 @@ def command_report(args):
         lines.append(f"| {case}_g{group} | {stats['rpm']['mean']:.1f} | "
                      f"{stats['rpm']['std']:.1f} | {error.get('max_abs', float('nan')):.2f} | "
                      f"{error.get('mean', float('nan')):.2f} | {stats['iq_ref']['mean']:.3f} |")
+    lines += ["", "## 空载运动模型", "", "仅使用组 3 的旋转中力矩和滑行段，|rpm| > 25；"
+              "速度平滑后以 50 ms 差分求加速度。系数次序为 Iq、ω、sgn(ω)、常数；"
+              "单位依次为 A、rad/s、无量纲、rad/s²。静止起动数据未参与拟合。", ""]
+    for bus, chunks in sorted(mechanics.items(), reverse=True):
+        current, omega, domega = (np.concatenate(parts) for parts in zip(*chunks))
+        if len(current) < 100 or np.ptp(current) < .1 or np.min(omega) >= 0 or np.max(omega) <= 0:
+            lines.append(f"- {bus:g} V：旋转样本或正反方向不足，未拟合。")
+            continue
+        design = np.column_stack((current, omega, np.sign(omega), np.ones(len(omega))))
+        coefficient = np.linalg.lstsq(design, domega, rcond=None)[0]
+        residual = domega - design @ coefficient
+        r2 = 1 - float(np.dot(residual, residual) / np.sum((domega - domega.mean()) ** 2))
+        lines.append(f"- {bus:g} V：dω/dt = {coefficient[0]:.2f} Iq "
+                     f"{coefficient[1]:+.4f} ω {coefficient[2]:+.2f} sgn(ω) "
+                     f"{coefficient[3]:+.2f}；R²={r2:.4f}，样本 {len(current)}。")
+        if abs(bus - 24) < .5:
+            lines.append("  24 V 原模型：1230 Iq − 0.0654 ω − 192.5 sgn(ω) − 0.27；"
+                         "仅与同母线实测结果比较。")
     target = os.path.join(args.directory, "REPORT.md")
     with open(target, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
@@ -408,7 +666,7 @@ def command_report(args):
 def command_chain(args):
     """Place independent repeats beside each other by capture-relative sample."""
     files = sorted(f for f in os.listdir(args.directory)
-                   if f.startswith(args.case) and f.endswith(".zip"))
+                   if f.startswith(args.case) and f.endswith((".zip", ".7z")))
     if len(files) < 2:
         raise SystemExit(f"need the same case on several groups, found {files}")
     blocks = []
@@ -423,7 +681,7 @@ def command_chain(args):
             raise SystemExit(f"{name}: duplicate group or discontinuous capture")
         seen.add(group)
         blocks.append(np.column_stack((seq, table[:, 2:12])).astype(np.float64))
-        columns += [f"g{group}_seq"] + [f"g{group}_{c}" for c in bench.GROUP_CHANNELS[group]]
+        columns += [f"g{group}_seq"] + meta["columns"][2:12]
     length = min(len(block) for block in blocks)
     matrix = np.column_stack([np.arange(length) / bench.SAMPLE_HZ] + [block[:length] for block in blocks])
     stem = os.path.join(args.directory, f"{args.case}_merged")
@@ -446,10 +704,97 @@ def command_list(args):
     return 0
 
 
+def custom_case(mode, shape):
+    command = {"torque": "Iq", "speed": "rpm", "position": "pos"}[mode]
+    value = float(input(f"{MODE_ZH[mode]}目标幅值（A/rpm/度，支持负数）："))
+    seconds = float(input("持续时间（秒）："))
+    if seconds <= 0:
+        raise ValueError("持续时间必须大于 0")
+    frequency = float(input("频率 Hz [直接回车为 0.5]：") or ".5") if shape in ("正弦", "方波") else .5
+    points = []
+    for n in range(int(seconds / .02) + 1):
+        t = n * .02
+        u = min(1.0, t / seconds)
+        if shape == "固定":
+            target = value
+        elif shape == "阶跃":
+            target = value if t >= .3 else 0.0
+        elif shape == "斜坡":
+            target = value * (2*u if u <= .5 else 2*(1-u))
+        elif shape == "正弦":
+            target = value * math.sin(2*math.pi*frequency*t)
+        elif shape == "方波":
+            target = value if math.sin(2*math.pi*frequency*t) >= 0 else -value
+        else:
+            x = 2*u if u <= .5 else 2*(1-u)
+            target = value * (3*x*x - 2*x*x*x)
+        points.append((n * 20, f"{command} {target:.2f}"))
+    initial = float(input("力矩测试预转速 rpm [回车为 0，即静止起步]：") or "0") if mode == "torque" else 0.0
+    setup = ["motion 500 5000 50000"] if mode == "position" else []
+    return Experiment(f"custom_{mode}_{shape}_{time.strftime('%H%M%S')}", mode, seconds + .5,
+                      points, {"amplitude": value, "frequency_hz": frequency}, shape,
+                      setup=setup, initial_rpm=initial)
+
+
+def menu(args):
+    while True:
+        print("\n====== F405 电机台架 ======\n1. 力矩测试\n2. 速度测试\n3. 位置测试\n"
+              "4. 全量测试\n5. 设备与电源\n6. 数据报告\n0. 退出")
+        choice = input("请选择：").strip()
+        if choice == "0":
+            return 0
+        if choice in ("1", "2", "3"):
+            mode = {"1": "torque", "2": "speed", "3": "position"}[choice]
+            print("1. 综合预设  2. 固定  3. 阶跃  4. 斜坡  5. 正弦  6. 方波  7. 三次曲线")
+            print("8. 特项列表（起动阈值/低速整圈/长行程等）  0. 返回")
+            kind = input("请选择工况：").strip()
+            if kind == "0":
+                continue
+            args.all = False
+            args.mode = mode
+            args.case = None
+            args.custom_experiment = None
+            if kind in ("2", "3", "4", "5", "6", "7"):
+                args.custom_experiment = custom_case(mode, {
+                    "2": "固定", "3": "阶跃", "4": "斜坡", "5": "正弦",
+                    "6": "方波", "7": "三次曲线"}[kind])
+            elif kind == "8":
+                available = MODES[mode](24)
+                for index, experiment in enumerate(available, 1):
+                    print(f"{index:2}. {experiment.case}：{experiment.note}")
+                selected = int(input("输入编号："))
+                args.case = available[selected - 1].case
+                args.include_long = True
+            elif kind != "1":
+                print("无效选项")
+                continue
+            args.buses = input("母线电压，逗号分隔 [回车为 24]：").strip() or "24"
+            args.groups = input("日志组 [回车为 0,1,2,3]：").strip() or "0,1,2,3"
+            args.repeat = int(input("重复次数 [回车为 1]：") or "1")
+            command_run(args)
+        elif choice == "4":
+            args.all, args.mode, args.case, args.custom_experiment = True, None, None, None
+            args.buses = "24,18,12"
+            command_run(args)
+        elif choice == "5":
+            command_list(args)
+            print("学生电源候选：" + ", ".join(devices.ports({(0x2E3C, 0x5740)})))
+            print("CH340 候选：" + ", ".join(devices.ports({(0x34B7, 0x6877), (0x1A86, 0x7523)})))
+        elif choice == "6":
+            directory = input("数据目录：").strip()
+            if directory:
+                command_report(argparse.Namespace(directory=directory))
+        else:
+            print("无效选项")
+
+
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("list", help="enumerate serial ports").set_defaults(func=command_list)
     discover = sub.add_parser("discover", help="probe the board")
@@ -457,17 +802,25 @@ def main():
     discover.set_defaults(func=command_discover)
 
     run = sub.add_parser("run", help="execute the case library")
-    run.add_argument("--mode", default="all", choices=["all", *MODES])
+    run.add_argument("--mode", choices=list(MODES))
+    run.add_argument("--all", action="store_true", help="显式运行全量工况")
+    run.add_argument("--case", help="仅运行指定工况名")
+    run.add_argument("--buses", default="24", help="母线电压，如 24,18,12")
     run.add_argument("--groups", default="0,1,2,3")
     run.add_argument("--repeat", type=int, default=1)
-    run.add_argument("--per-cel", type=float, default=3.0, dest="per_cel")
-    run.add_argument("--amp-steps", type=int, default=5, dest="amp_steps")
-    run.add_argument("--rate-steps", type=int, default=3, dest="rate_steps")
     run.add_argument("--iq-limit", type=float, default=DEFAULT_IQ_LIMIT, dest="iq_limit")
     run.add_argument("--rpm-limit", type=float, default=DEFAULT_RPM_LIMIT, dest="rpm_limit")
     run.add_argument("--pos-limit", type=float, default=DEFAULT_POS_LIMIT, dest="pos_limit")
-    run.add_argument("--out", default=os.path.join(tempfile.gettempdir(), "foc_bench"))
+    run.add_argument("--out", default=bench.DATA_ROOT)
     run.add_argument("--sn")
+    run.add_argument("--stlink-sn")
+    run.add_argument("--uart", help="CH340 串口")
+    run.add_argument("--psu", help="学生电源串口；off 表示不连接")
+    run.add_argument("--include-long", action="store_true", help="加入 60 圈位置专项")
+    run.add_argument("--load-name", default="空载")
+    run.add_argument("--load-mass-g", type=float)
+    run.add_argument("--load-stl")
+    run.add_argument("--load-axis")
     run.add_argument("--dry-run", action="store_true", dest="dry_run")
     run.add_argument("--yes", action="store_true")
     run.set_defaults(func=command_run)
@@ -482,6 +835,12 @@ def main():
     chain.set_defaults(func=command_chain)
 
     args = parser.parse_args()
+    if args.command is None:
+        return menu(argparse.Namespace(all=False, mode=None, case=None, buses="24", groups="0,1,2,3",
+            repeat=1, iq_limit=DEFAULT_IQ_LIMIT, rpm_limit=DEFAULT_RPM_LIMIT,
+            pos_limit=DEFAULT_POS_LIMIT, out=bench.DATA_ROOT, sn=None, stlink_sn=None,
+            uart=None, psu=None, include_long=False, dry_run=False, yes=False,
+            load_name="空载", load_mass_g=None, load_stl=None, load_axis=None))
     return args.func(args)
 
 

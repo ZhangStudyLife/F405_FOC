@@ -1,5 +1,4 @@
 #include "control.h"
-#include "bsp_uart.h"
 #include "foc.h"
 #include <math.h>
 
@@ -14,11 +13,12 @@
 #define CONTROL_BANDWIDTH 0.1f  /* Integrator back-calculation gain. */
 #define CONTROL_PERIOD_US 1000u /* Outer-loop period; runs once per millisecond. */
 #define CONTROL_JUMP_US 4000u   /* Gap above this is a discontinuity, not a dt. */
-#define CONTROL_COMMAND_MS 200u /* Stop if the host stops sending mode targets. */
 static uint32_t mode, fault;
 static float position, reference, speed, speed_target, position_target;
+static float motion_speed = 100.0f, motion_accel = 1000.0f, motion_jerk = 10000.0f;
+static float profile_speed, profile_accel;
 static float integral_speed, last_deg;
-static uint32_t previous_tick, command_ms;
+static uint32_t previous_tick;
 static bool tracking, commanded;
 
 float control_iq_ref(void) { return reference; }
@@ -29,10 +29,9 @@ float control_speed_target(void) { return speed_target; }
 float control_position_deg(void) { return position; }
 float control_position_target(void) { return position_target; }
 
-/* A held output demands a live host; used only while commanded. */
 bool control_scheduled(void)
 {
-    return commanded && (uint32_t)(bsp_uart_millis() - command_ms) < CONTROL_COMMAND_MS;
+    return commanded;
 }
 
 void control_stop(void)
@@ -41,12 +40,12 @@ void control_stop(void)
     fault = 0u;
     commanded = false;
     reference = speed_target = position_target = 0.0f;
+    profile_speed = profile_accel = 0.0f;
     integral_speed = 0.0f;
 }
 
 static void accept(void)
 {
-    command_ms = bsp_uart_millis();
     commanded = true;
     fault = 0u;
 }
@@ -71,12 +70,10 @@ static bool go(void)
     return true;
 }
 
-/* A host that keeps a run alive resends its target about ten times a second, so
-   a resend must not disturb the loops. A first command, a mode change, or a
-   command after a long silence drops the integrators instead. */
+/* Repeating a target in the same mode must not reset the integrator. */
 static bool continuous(uint32_t wanted)
 {
-    return mode == wanted && (uint32_t)(bsp_uart_millis() - command_ms) < CONTROL_COMMAND_MS;
+    return mode == wanted && commanded;
 }
 
 static bool start(uint32_t wanted, float target)
@@ -109,8 +106,21 @@ bool control_speed(float rpm)
 
 bool control_position(float deg)
 {
+    bool was_position = continuous(CONTROL_POSITION);
     if (!start(CONTROL_POSITION, deg)) return false;
+    if (!was_position) { profile_speed = speed; profile_accel = 0.0f; }
     position_target = deg;
+    return true;
+}
+
+bool control_motion(float rpm, float acceleration, float jerk)
+{
+    if (!isfinite(rpm) || !isfinite(acceleration) || !isfinite(jerk) ||
+        rpm <= 0.0f || rpm > FOC_SPEED_MAX || acceleration <= 0.0f ||
+        acceleration > 100000.0f || jerk <= 0.0f || jerk > 1000000.0f) return false;
+    motion_speed = rpm;
+    motion_accel = acceleration;
+    motion_jerk = jerk;
     return true;
 }
 
@@ -125,20 +135,40 @@ bool control_zero(void)
 {
     if (foc.state != FOC_IDLE || fabsf(foc.rpm) >= 5.0f) return false;
     position = 0.0f;
+    profile_speed = profile_accel = 0.0f;
     tracking = false;
     return true;
 }
 
-/* Speed PI with the position P above it. foc.rpm is already encoder-filtered. */
+/* Jerk-limited position velocity, replanned from the remaining distance each
+   millisecond. Its speed and acceleration survive mid-move target changes. */
+static void position_profile(float dt)
+{
+    float error = position_target - position;
+    float direction = error > 0.0f ? 1.0f : error < 0.0f ? -1.0f : 0.0f;
+    float desired = fminf(motion_speed, POSITION_KP * fabsf(error)) * direction;
+    float v = fmaxf(fabsf(profile_speed), fabsf(speed)) * 6.0f;
+    float a = motion_accel * 6.0f, j = motion_jerk * 6.0f;
+    float stop = v * v / (2.0f * a) + v * a / (2.0f * j);
+    if (profile_speed * direction > 0.0f) {
+        stop += v * fmaxf(0.0f, profile_accel * direction * 6.0f) / j;
+        if (fabsf(error) <= stop * 2.0f) desired = 0.0f;
+    }
+    float requested = fmaxf(-motion_accel, fminf(motion_accel, (desired - profile_speed) / dt));
+    if (profile_accel > 0.0f && desired > profile_speed &&
+        profile_speed + profile_accel * profile_accel / (2.0f * motion_jerk) >= desired) requested = 0.0f;
+    if (profile_accel < 0.0f && desired < profile_speed &&
+        profile_speed - profile_accel * profile_accel / (2.0f * motion_jerk) <= desired) requested = 0.0f;
+    float change = fmaxf(-motion_jerk * dt, fminf(motion_jerk * dt, requested - profile_accel));
+    profile_accel += change;
+    profile_speed += profile_accel * dt;
+    speed_target = profile_speed;
+}
+
+/* Speed PI with the position profile above it. foc.rpm is encoder-filtered. */
 static float outer_output(float dt)
 {
-    if (mode == CONTROL_POSITION) {
-        float omega = POSITION_KP * (position_target - position);
-        float ceiling = 100.0f;
-        if (omega > ceiling) omega = ceiling;
-        if (omega < -ceiling) omega = -ceiling;
-        speed_target = omega;
-    }
+    if (mode == CONTROL_POSITION) position_profile(dt);
     float error = speed_target - speed;
     float wanted = SPEED_KP * error + integral_speed;
     float limited = wanted;
@@ -157,7 +187,7 @@ void control_step(uint32_t sample_us, float mechanical_deg)
     if (isnan(mechanical_deg)) return;
     uint32_t elapsed = (sample_us - previous_tick) & 0xffffffu;
     if (elapsed < CONTROL_PERIOD_US) return;
-    /* At the 9400 RPM limit, one millisecond moves less than 57 degrees. */
+    /* At the 8600 RPM limit, one millisecond moves less than 52 degrees. */
     if (!tracking) { last_deg = mechanical_deg; tracking = true; }
     float step_deg = mechanical_deg - last_deg; /* foc_step already unwraps. */
     last_deg = mechanical_deg;
@@ -170,10 +200,5 @@ void control_step(uint32_t sample_us, float mechanical_deg)
     previous_tick = sample_us;
     speed = foc.rpm;
     if (!commanded || mode == CONTROL_TORQUE) return; /* Torque keeps its own Iq reference. */
-    /* The outer loops hold a computed reference, so they stop when the host
-       falls silent. Torque mode keeps the historical `Iq` semantics and has no
-       watchdog. A host that comes back clears the watchdog fault by itself. */
-    if (!control_scheduled()) { fault = FOC_UART; return; }
-    if (fault == FOC_UART) fault = 0u;
     reference = outer_output(dt);
 }

@@ -150,9 +150,9 @@ int main(void)
         assert((index_word() & 0xffffffu) == ((n + 1u) & 0xffffffu));
         if (group == 0u) {
             assert(channel(2) == 2050.0f && channel(3) == 2045.0f && channel(4) == 1040.0f);
-            assert(channel(5) == adc_sample.b_voltage && channel(7) == adc_sample.bus_voltage);
-            assert(channel(8) == mt6835_raw_deg && channel(9) == (float)motor_sample_us);
-            assert(channel(11) == foc.b_offset);
+            assert(channel(5) == mt6835_raw_deg && channel(6) == mt6835_angle_deg);
+            assert(channel(7) == 1680.0f && channel(8) == 2100.0f && channel(9) == 2520.0f);
+            assert(channel(10) == foc.b_offset && channel(11) == foc.c_offset);
         } else if (group == 1u) {
             assert(fabsf(channel(2) - 0.1f) < 1e-5f && fabsf(channel(3) + 0.1f) < 1e-5f);
             assert(channel(4) == foc.electrical_deg && channel(5) == foc.iq_ref);
@@ -174,9 +174,13 @@ int main(void)
     assert(s_uart_frames == 2000u);
     /* Every commutated sample was logged: one USB frame per app_sample(). */
 
-    /* Reference chain: the 1 A/s ramp converges, then holds the target. */
+    /* Reference chain: the 10 A/s ramp converges, then holds the target. */
     assert(fabsf(foc.iq_ref - 0.5f) < 1e-4f);
     usb("Iq 0.20\r");
+    float before_ramp = foc.iq_ref;
+    motor_sample_us = (uint32_t)(motor_sample_us + 50u) & 0xffffffu;
+    app_sample();
+    assert(fabsf(foc.iq_ref - before_ramp + 5e-4f) < 1e-5f);
     for (unsigned n = 0; n < 6000u; ++n) {
         motor_sample_us = (uint32_t)(motor_sample_us + 50u) & 0xffffffu;
         app_sample();
@@ -200,6 +204,9 @@ int main(void)
     usb("stop\r");
     usb("pos 720.00\r"); assert(foc.state == FOC_PRECHARGE && control_mode() == 2u);
     assert(control_position_target() == 720.0f);
+    unsigned before_motion = app_command_rejected;
+    usb("motion 7000 50000 500000\r"); assert(app_command_rejected == before_motion);
+    assert(!app_command("motion 7000 0 500000"));
     usb("stop\r");
     assert(control_mode() == 0u && control_position_target() == 0.0f);
     /* `zero` needs the idle, stationary encoder state. */
@@ -210,6 +217,6 @@ int main(void)
     unsigned before = app_command_rejected;
     assert(app_command("hello") && app_command_rejected == before);
     puts("PASS: 4-group 12-float USB layout, status word, send/rpm/pos/zero parsing,"
-         " 20k frames, 1 A/s ramp, outer-loop reference selection");
+         " 20k frames, 10 A/s ramp, motion parsing, outer-loop reference selection");
     return 0;
 }

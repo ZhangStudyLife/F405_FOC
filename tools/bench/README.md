@@ -1,159 +1,52 @@
-# tools：电机测试数据系统
+# F405 电机台架
 
-本目录保存**主机端工具**。固件接口与命令见 [App/README.md](../../App/README.md)，
-主机回归测试见 [tests/README.md](../../tests/README.md)，硬件接线见
-[硬件PCB拓扑.md](../../硬件PCB拓扑.md)。
+从仓库根目录运行 `download\bench.cmd`（无参数或 `run` 打开中文菜单）。菜单先选力矩、速度、位置或全量，再选固定、阶跃、斜坡、正弦、方波、三次曲线和幅值；设备、报告也可在菜单中选择。只有显式选择“全量”或使用 `run --all` 才运行全量。
 
-## bench/：一键电机台架
-
-从仓库根目录用 `download/bench.cmd`，或直接调用 Python：
-
-```sh
-download\bench.cmd list                 # 列出串口，FOC 板前有 * 标记
-download\bench.cmd discover             # 探活：帧率、字节率、帧尾校验、连续性
-download\bench.cmd run --dry-run        # 只打印工况清单与预估时长，不发命令
-download\bench.cmd run                  # 全量工况（需 --yes 或交互确认）
-download\bench.cmd run --mode speed --groups 3 --per-cel 5
-download\bench.cmd report %TEMP%\foc_bench\<时间戳>
-download\bench.cmd chain  %TEMP%\foc_bench\<时间戳> step_pos_360
+```powershell
+download\bench.cmd run --all --dry-run
+download\bench.cmd run --mode speed --case speed_cross_zero --groups 0,1,2,3 --buses 24
+download\bench.cmd run --all --psu COM16 --uart COM14 --yes
+download\bench.cmd report E:\405_FOC\data\<会话时间>
+download\bench.cmd chain E:\405_FOC\data\<会话时间> speed_cross_zero
 ```
 
-`run` 默认写入 `%TEMP%\foc_bench\<时间戳>\`（可用 `--out` 改）。每个
-`(工况, 日志组)` 一个压缩包：`<工况>_g<组>_r<重复>.zip`，内含
+`run --mode torque|speed|position` 跑该模式预设；`--case` 只选一个工况；`--include-long` 加入 60 圈位置专项。默认限值是 5 A、7000 rpm、21600°，可用 `--iq-limit`、`--rpm-limit`、`--pos-limit` 缩小。CH340 监测高速/大电流工况必需；学生电源在线时自动识别 DPS-150，多个有效设备需 `--psu` 指定。多母线全量要求学生电源，按 24→18→12 V 运行，每档设置并读回 5 A 母线限流。电机仍是空载台架；带 3D 打印负载可用 `--load-name`、`--load-mass-g`、`--load-stl`、`--load-axis` 记元数据。
 
-| 文件 | 内容 |
-|---|---|
-| `meta.json` | 工况名、模式、组号、目标值、命令时间线、抖动、限制、git 版本、列名 |
-| `frames.f32` | 原始帧流，**每帧 12 个小端 float32 + 4 字节帧尾 = 52 字节** |
+## 工况
 
-`frames.f32` 可直接用 numpy 读：
+- **力矩**：正负静止起动阈值；先以速度模式达到 ±250/1000 rpm 后切换不同正负 Iq，记录加减速与滑行；±250/1000/4000 rpm 断电滑行；0.2/0.5/1 Hz 正弦和方波。未进入旋转态的段不用于拟合运行摩擦、惯量。
+- **速度**：一段综合序列覆盖正负 1/5/25/100/250/500/1000/2000/4000/6000/7000 rpm；另有 `0→1000→−2000→0`、1/5/25 rpm 整圈、斜坡、正弦、方波、三次曲线。12/18 V 下估计不可达的高目标只停留 0.8 秒，记录限幅响应。
+- **位置**：三段综合往返轨迹覆盖 ±30/90/180/360/720/1800/3600°，速度/加速度/跃度档分别是 500/5000/50000、3000/20000/200000、7000/50000/500000。`position_long_60turn` 是单列高速专项。
 
-```python
-import numpy as np, json, zipfile
-with zipfile.ZipFile("step_pos_360_g3_r0.zip") as z:
-    meta = json.loads(z.read("meta.json"))
-    data = np.frombuffer(z.read("frames.f32"), dtype="<f4").reshape(-1, 13)[:, :12]
-```
+每个工况按 `send 0..3` 分次重复。脚本先 `stop` 等待静止，位置段再 `zero`；带初速的力矩段先达到并保持目标速度 0.2 秒。跟踪误差超标时标记后继续；保护或丢帧保存残段，断电恢复最多重试一次。实时 CH340 超过 8000 rpm 会停机；固件在 8600 rpm 保护。固件 `Iq` 参考按 10 A/s 变化。
 
-或让库代劳（解压到临时目录并给出连续性统计）：
+## 文件与同步
 
-```python
-import sys; sys.path.insert(0, r"E:\405_FOC\405_FOC\tools\bench")
-import benchlib
-table, meta = benchlib.load(r"...\step_pos_360_g3_r0.zip")
-print(meta["continuity"])
-```
+全部文件写在 `E:\405_FOC\data\<会话时间>\`，不使用 C 盘临时目录。每个“工况阶段 × 电压 × 日志组 × 重复 × 尝试”生成独立 `.7z`，采用 LZMA2 高压缩级别。包含 `frames.f32`、`meta.json`、`uart.jsonl`，学生电源在线时另含 `power.jsonl`。先关闭原始文件并校验 7z，再删除未压缩暂存；失败保留暂存供排查。`session.json` 随测试增量更新。`report`、`chain` 同时兼容历史 ZIP 与新 7z。
 
-## 高速帧格式（USB 20 kHz）
+`frames.f32` 每帧 12 个小端 float32 + `00 00 80 7F` 帧尾，共 **52 字节 × 20 kHz = 1,040,000 B/s**。0 号 float 的位表示低 24 位微秒时间戳、高 8 位状态；1 号 float 的位表示低 24 位采样序号、高 8 位日志组。序号和时间戳需按 24 位回绕展开。`meta.json` 保存通道表、命令时间线、版本、限制、母线与连续性；旧 ZIP 依据其自身通道表读取。CH340 日志包含与 USB 共用的采样序号和主机单调时间，电源原始接收块及解析值用同一主机时钟记录；`time_alignment` 给出约 20 Hz UART 时间锚点的残差。电源约 2 Hz，只能反映低频母线趋势，不能作相电流或高频纹波测量。
 
-`send X` 之后每个 20 kHz 采样发一帧：**12 个小端 float32 + 帧尾 `00 00 80 7F` = 52 字节，即 1,040,000 B/s**。
-
-| 下标 | 内容 |
-|---|---|
-| 0 | 低 24 位 = `t_u24`（TIM5 微秒，16.78 s 回绕）；高 8 位 = 状态字：bit0..2 状态、bit3..6 故障、bit7 为 PWM 已开启 |
-| 1 | 低 24 位 = `seq`（20 kHz 单调计数，13.98 min 回绕）；高 8 位 = 日志组号 |
-| 2..11 | 该组的 10 个数据通道（见下表） |
-
-**时间与丢帧**：`t_u24` 与 `seq` 是权威采样身份，与组号无关；组号切换不重置它们。
-相邻帧应满足 `seq` 差 1，ISR 时间戳一般差 50 µs，允许 45..55 µs 入口抖动。若某帧丢失，`seq` 差 2、`t_u24`
-约差 100 µs；按 `seq` 可重建严格 20 kHz 网格。`benchlib.continuity()` 给出
-`gaps`（序号不连续或时间差超出 45..55 µs 的间隔数）、`timestamp_jitter`、`max_gap_us`、`missing`（序号推算丢失帧数）与 `seq_ok`。
-
-状态字：状态 `0..6` = IDLE/PRECHARGE/CALIBRATE/SAVE/RUN/FAULT/OFFSET；
-故障 `0..12` = OK/SENSOR/ADC/TIMING/WINDOW/ALIGNMENT/FLASH/UART/BUS/ZERO/CURRENT/SPEED/POSITION；
-bit7=1 表示 PWM 已开启；OFF/PRECHARGE 由状态区分。
-
-### 四组通道（先发无法离线反算的量）
-
-| 下标 | 组 0 raw | 组 1 current | 组 2 voltage | 组 3 control |
+| 下标 | 组 0 同步原始量 | 组 1 电流环 | 组 2 电压/PWM | 组 3 控制/机械 |
 |---|---|---|---|---|
-| 2 | `adc_raw_b` | `ib` A | `ud` V | `iq_ref` A |
-| 3 | `adc_raw_c` | `ic` A | `uq` V | `iq_ref_cmd` A |
-| 4 | `adc_raw_bus` | `elec_deg` ° | `ccr_a` | `pos_deg` ° |
-| 5 | `v_b` V | `iq_ref` A | `ccr_b` | `pos_tgt` ° |
-| 6 | `v_c` V | `integral_d` V | `ccr_c` | `rpm` |
-| 7 | `v_bus` V | `integral_q` V | `duty_a` | `rpm_encoder` |
-| 8 | `angle_raw_deg` ° | `ud` V | `duty_b` | `rpm_tgt` |
-| 9 | `sample_us` | `uq` V | `duty_c` | `iq` A |
-| 10 | `bus_v_nominal` V | `b_offset` V | `edge_limit_v` V | `mode` |
-| 11 | `b_offset` V | `c_offset` V | `vec_limit_v` V | `bus_v` V |
+| 2 | ADC B 原码 | Ib | Ud | Iq_ref |
+| 3 | ADC C 原码 | Ic | Uq | Iq 命令 |
+| 4 | 母线 ADC 原码 | 电角度 | CCR A | 多圈位置 |
+| 5 | 编码器原始角 | Iq_ref | CCR B | 目标位置 |
+| 6 | 编码器校正角 | d 积分器 | CCR C | 滤波 RPM |
+| 7 | **采样周期** CCR A | q 积分器 | Duty A | 编码器 RPM |
+| 8 | **采样周期** CCR B | Ud | Duty B | 目标 RPM |
+| 9 | **采样周期** CCR C | Uq | Duty C | Iq |
+| 10 | B 零偏 | B 零偏 | 采样窗口上限 | 模式 |
+| 11 | C 零偏 | C 零偏 | Vbus/√3 | 母线 V |
 
-- **组 0**：ADC 原始码值与编码器**未修正**角度（二阶谐波补偿前的真值）。
-  原始码值不是为了标定增益（软件无法自标定），而是把标定自由度留到将来：
-  一旦有电流探头或已知负载，可以用同一批历史数据重算，不必重做实验。
-  换算（`App/Hardware/bsp/bsp_adc.c`）：`v_b = adc_raw_b * 3.3/4095`，
-  `v_bus = adc_raw_bus * (3.3/4095) * (41.2/2.2)`，
-  `i = (v - offset) * 50`（标称，未标定）。
-- **组 1**：PI 积分器与输出是电流环内部状态，主机无法从别处反算。
-- **组 2**：`ccr_*` 是本周期实际生效的量化值（uint16 精确），电压余量对应
-  `foc_modulate` 的采样窗口上限与 `Vbus/√3` 线性上限。
-- **组 3**：`pos_deg`/`rpm` 是编码器 Ground Truth，进入无感 FOC 后仍然采集，
-  用于与估计角度/速度对比。`mode`：0=Torque、1=Speed、2=Position。
+组 0 的电流、母线、编码器和所采 PWM 周期的比较值是同一个 ADC 样本；相电压仍须由母线和 PWM 模型推算，受死区、开关及采样误差影响。组 1/2/3 的重复测试只能按相对起点比较，不能称作同一物理瞬间。相电流绝对增益尚未对标准仪器校准；本轮不宣称已可靠辨识 Rs/Ld/Lq。
 
-同一工况在 4 个组上分别跑，`chain` 按每段采集开始后的样本序号并列导出宽表 CSV。
-各次运行的全局 `seq` 不相同，这种并列仅供重复性比较，**不能视作同一物理瞬间**；
-目前组 0 的电流与组 2 的 PWM 不同时采集，尚不能做严格的逐样本无感 FOC 回放。
+## 固件命令与自检
 
-## 命令
+`Iq <A>` 力矩、`rpm <值>` 速度（±8600 rpm）、`pos <绝对多圈角度>` 位置；`motion <最高rpm> <加速度rpm/s> <跃度rpm/s²>` 设置后续位置轨迹。`zero` 仅静止待机可用；`stop` 关功率；`send 0..3` 仅切日志组；`clear` 不自动重新运行。速度与位置保持上次目标直到新命令或 `stop`。
 
-| 命令 | 含义 |
-|---|---|
-| `Iq <A>` | Torque 模式，目标 Iq，±5 A、最多两位小数 |
-| `rpm <v>` | Speed 模式，目标转速，±9400 RPM |
-| `pos <deg>` | Position 模式，**绝对**多圈机械角度，±1e6° |
-| `zero` | 把当前位置定义为 0°（需停机且静止） |
-| `stop` | 立即关断 |
-| `clear` | 清已消失的故障，不自动启动 |
-| `cal` | 停机重校准 |
-| `send X` | 切换 20 kHz 日志组，X = 0..3（纯日志开关，与电机状态无关） |
-| `hello` | **仅 UART** 回 `#FOC 1.1 <状态字>`；不发到 USB 二进制流，避免破坏分帧 |
-
-三条模式命令**命令即切模式**，不需要额外的 mode 命令。速度环/位置环是 1 kHz
-外环，最终输出 Iq 参考，底层仍是现有 20 kHz Id/Iq 电流环。
-
-**看门狗**：Speed/Position 模式下若主机超过 200 ms 不再发目标，固件置
-`FOC_UART` 停机——因为外环正握着计算出的参考值，PC 挂死必须能自停。
-Torque 模式保持历史语义，没有该看门狗。所以主机必须周期性重发目标；
-`benchlib.Scheduler` 默认 100 ms 重发一次，既保活又保证输入一致。
-
-**参考斜坡**：Iq 参考按 1 A/s 从上一个值爬到新目标（20 kHz 定步长，实测
-`iq - iq_prev == 5e-5 A`，即 1 A/s）。`stop` 清零并取消未完成的斜坡。
-PC 只发一条 setpoint，斜坡由固件完成，因此同一工况的命令值在时间上可复现；
-`meta.json.command_jitter_ms` 记录实际发送偏差供分析核对。
-
-## 安全性
-
-- 主机侧默认 `--iq-limit 0.4 A`、`--rpm-limit 1000`、`--pos-limit 1200°`，
-  超限的工况在**发命令之前**就会被拒绝并打印 `SKIP`。
-- 每个 (工况, 组) 采集结束后立刻检查归档：出现故障帧或 20 kHz 连续性丢失即
-  终止整轮，不静默重试。
-- 每次切换工况前执行固定前置序列（`stop` → 静置 → 位置模式 `zero`），
-  保证同一工况跨组、跨重复的输入一致。
-- 电机**无负载**固定台架；母线允许范围与电机额定范围不同，扩大幅值前先确认供电。
-
-## 分析配方
-
-- **电流/速度/位置闭环**：用组 3 的 `iq_ref_cmd`/`rpm_tgt`/`pos_tgt` 与
-  `rpm`/`pos_deg` 算跟随误差、超调、静差、低速纹波。
-- **Rs/Ld/Lq/磁链辨识**：组 0 的 `adc_raw_b/c/bus` + 组 1 的 `elec_deg`、
-  `ud/uq`、组 2 的 `duty_*`；先在 `send 0` 下用静止注入或低速旋转取样。
-- **机械参数（负载/惯量/摩擦）**：`send 0` 下施加已知 `Iq` 阶跃，用组 0 的
-  未修正角度差分得快照速度，拟合加速段斜率。
-- **无感 FOC 离线回放**：组 0（Vbus、原始电流码、真实角度）+ 组 2（实际施加的
-  `duty`/`ccr`）足以在 PC 上重放电压与电流；组 3 提供目标轨迹与 Ground Truth 转速。
-- **角度估计对比**：任何估计器都用组 0 的 `angle_raw_deg` 与组 3 的 `pos_deg`/
-  `rpm` 作基准，注意前者是补偿前的真值。
-
-未标定项：相电流绝对精度与增益、编码器内部测量延迟、`FOC_EDGE_LIMIT` 隐含的
-模拟建立时间。不要把这些数字当成已标定事实。
-
-## 自检
-
-不接硬件也可以验证解析器：
-
-```sh
-python tools/bench/selftest.py
+```powershell
+python tools\bench\selftest.py
 ```
 
-覆盖帧字节往返、拆分/粘连读取、错位重同步、丢帧检测、损坏拒绝、通道表、
-归档往返与工况限值校验。
+这会验证帧解析、丢帧识别、新 7z 与旧 ZIP 往返、限值检查；实机 120 秒 × 四组的带宽结果另存到数据目录，不以旧 USB 记录代替。

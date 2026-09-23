@@ -1,13 +1,13 @@
 # 固件结构与使用
 
-当前功能：M1 20 kHz 有感 FOC，Id_ref=0，Iq 命令范围 ±5 A、1 A/s 参考斜坡；MT6835 角度换相，实测母线补偿，居中 SVPWM。当前 PI 标称带宽 600 Hz。在电流环之上新增 **1 kHz 速度环与位置环（基础 P+I）**，输出仍是 Iq 参考；USB 20 kHz 改为 **`send 0..3` 四组分组日志**。每次启动先关断校零；已有 Flash 电角度记录时保持待机。首次/显式 cal 的对齐电压仍 0.6 V。本次实现与实测详见本地 [电流内环报告](../build/foc_analysis/REPORT.md)，旧 [tests/FOC_TEST.md](../tests/FOC_TEST.md) 属于历史电压模式。
+当前功能：M1 20 kHz 有感 FOC，Id_ref=0，Iq 命令范围 ±5 A、10 A/s 参考斜坡；MT6835 角度换相，实测母线补偿，居中 SVPWM。当前 PI 标称带宽 600 Hz。在电流环之上新增 **1 kHz 速度环与位置环（基础 P+I）**，输出仍是 Iq 参考；USB 20 kHz 改为 **`send 0..3` 四组分组日志**。每次启动先关断校零；已有 Flash 电角度记录时保持待机。首次/显式 cal 的对齐电压仍 0.6 V。本次实现与实测详见本地 [电流内环报告](../build/foc_analysis/REPORT.md)，旧 [tests/FOC_TEST.md](../tests/FOC_TEST.md) 属于历史电压模式。
 
 ## 模块
 
 | 位置 | 职责 |
 |---|---|
 | `Control/app.c` | 初始化、串口命令、UART 2 kHz 和 USB 20 kHz 分组回传 |
-| `Control/control.c` | 1 kHz 速度环/位置环（串级），目标接收、看门狗、多圈位置累积 |
+| `Control/control.c` | 1 kHz 速度环/位置环（串级），目标接收、多圈位置累积 |
 | `FOC/foc.c` | 零偏、ABC/dq、双 PI/抗饱和、预测角度、SVPWM、校准状态、Iq 斜坡 |
 | `Hardware/bsp/bsp_motor.c` | TIM8 功率输出、谷底更新/超时关断、校准 Flash |
 | `Hardware/bsp/bsp_adc.c` | TIM8 采样触发、双 ADC 同步 DMA、电压换算、原始码值 |
@@ -24,7 +24,7 @@ USB 端口置 DTR 后，每个采样回调通过一次 `bsp_usb_write` 回传 **
 
 | 组 | 内容 |
 |---|---|
-| 0 | B/C/母线 ADC 原始码值、三路电压、编码器**未修正**角度、采样微秒、`b_offset` |
+| 0 | B/C/母线 ADC 原码、编码器原始/校正角、被本次 ADC 采样的 PWM 周期 CCR A/B/C、两相零偏 |
 | 1 | Ib/Ic、电角度、`iq_ref`、PI 积分器 `integral_d/q`、`ud/uq`、零偏 |
 | 2 | `ud/uq`、本周期生效的 CCR/占空比、采样窗口电压上限、`Vbus/√3` 线性上限 |
 | 3 | Iq 参考与实测值、多圈 `pos_deg`、目标位置、编码器 `rpm`、目标转速、控制模式 |
@@ -37,13 +37,13 @@ UART 封装接口为 `uart_justfloat`，仍是 2 kHz、15 float。USB 需要 PC 
 
 `Iq <A>` / `rpm <v>` / `pos <deg>` 三条命令**命令即切模式**，无需额外 mode 命令。三者都通过同一个 PRECHARGE 联锁启动（2 ms 三低侧导通），`stop` 是唯一的下降路径。
 
-- **Torque**：目标 Iq，与既有语义一致；`Iq 0` 待机时不启动，运行中保持零目标电流环。参考按 **1 A/s** 从上一个值斜坡到新目标（20 kHz 定步长），`stop` 清零并取消未完成的斜坡。
-- **Speed**：1 kHz 速度环，目标 ±9400 RPM。复用 `foc.rpm` 的 20 kHz 编码器低通测速；外环计算在本周期 PWM 提交后进行，下一电流周期使用其 Iq 参考。
-- **Position**：位置环 P 输出转速目标，再串速度环 PI，最终输出 Iq 参考。目标为**绝对多圈角度**（如 `pos 720.00` 表示两整圈），`zero` 把当前位置定义为 0°（需停机且静止）。当前增益 4 RPM/°，位置模式目标转速限幅 ±100 RPM。
+- **Torque**：目标 Iq，与既有语义一致；`Iq 0` 待机时不启动，运行中保持零目标电流环。参考按 **10 A/s** 从上一个值斜坡到新目标（20 kHz 定步长），`stop` 清零并取消未完成的斜坡。
+- **Speed**：1 kHz 速度环，目标 ±8600 RPM。复用 `foc.rpm` 的 20 kHz 编码器低通测速；外环计算在本周期 PWM 提交后进行，下一电流周期使用其 Iq 参考。
+- **Position**：位置模式在 1 kHz 外环按速度、加速度、跃度约束规划 S 曲线速度目标，再交给速度 PI 输出 Iq。目标为**绝对多圈角度**（如 `pos 720.00` 表示两整圈）；运行中改目标会连续重规划。`zero` 把当前位置定义为 0°（需停机且静止）。默认规划上限 100 RPM、1000 RPM/s、10000 RPM/s²，可用 `motion` 命令修改。
 
-参数在 `App/Control/control.c` 顶部常量块：`SPEED_KP=0.005`、`SPEED_KI=0.01`、`POSITION_KP=4`。位置环只有 P 项。外环输出限幅与 `Iq` 命令同为 ±5 A。
+参数在 `App/Control/control.c` 顶部常量块：`SPEED_KP=0.005`、`SPEED_KI=0.01`、`POSITION_KP=4`。外环输出限幅与 `Iq` 命令同为 ±5 A。
 
-**主机看门狗**：Speed/Position 模式下若超过 **200 ms** 没有收到新目标，置 `FOC_UART` 并停机——外环握着计算出的参考值，PC 挂死必须能自停。主机回来后重新下发目标即可清除该故障。Torque 模式保持历史语义，没有该看门狗。
+Speed/Position 模式持续保持上次目标，直到新目标或 `stop`；无需主机周期性重发。UART 接收错误仍会触发 `FOC_UART` 故障。
 
 外环在 `foc_step` 的 `FOC_RUN` 分支内调度：`control_step()` 以 `motor_sample_us` 计时，每毫秒执行一次；同一周期内的其余 19 个采样点沿用上一个参考值。电流环的 PI、抗饱和、预测角度与 SVPWM 未改动。
 
@@ -78,9 +78,10 @@ USART2：PA2 TX / PA3 RX，**2000000 baud、8N1、无流控**。当前转换器 
 
 | 命令 | 范围 | 说明 |
 |---|---|---|
-| `Iq 0.20` | ±5 A | Torque 模式目标，1 A/s 参考斜坡 |
-| `rpm -500` | ±9400 RPM | Speed 模式目标，**可正负** |
+| `Iq 0.20` | ±5 A | 力矩模式目标，10 A/s 参考斜坡 |
+| `rpm -500` | ±8600 RPM | 速度模式目标，**可正负** |
 | `pos 720.00` | ±1e6° | Position 模式目标，绝对多圈机械角度 |
+| `motion 7000 50000 500000` | 速度/加速度/跃度 | 设置后续位置 S 曲线约束，不启动电机 |
 | `zero` | — | 把当前位置定义为 0°，需停机且静止 |
 | `send 0`..`send 3` | — | 切换 20 kHz 日志组，纯日志开关 |
 | `stop` | — | 立即关断，取消斜坡与外环 |

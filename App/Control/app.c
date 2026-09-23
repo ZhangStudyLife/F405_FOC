@@ -69,7 +69,7 @@ static uint32_t status_word(void)
    terminator. Group 0 carries raw sensor truth, group 1 current-loop internals,
    group 2 the applied voltage, group 3 the reference and mechanical response.
    Channels that a host can reconstruct offline are deliberately absent. */
-static void telemetry_usb(void)
+static void telemetry_usb(const float sampled_duty[3])
 {
     union { float f; uint32_t u; } time, index;
     time.u = (motor_sample_us & 0xffffffu) | (status_word() << 24);
@@ -78,17 +78,17 @@ static void telemetry_usb(void)
     payload[0] = time.f;
     payload[1] = index.f;
     switch (telemetry_group) {
-    default: /* Group 0: raw ADC codes, bus voltage, uncorrected encoder angle. */
+    default: /* Group 0: current, bus, encoder, and PWM of the sampled period. */
         payload[2] = (float)adc_raw_b;
         payload[3] = (float)adc_raw_c;
         payload[4] = (float)adc_raw_bus;
-        payload[5] = adc_sample.b_voltage;
-        payload[6] = adc_sample.c_voltage;
-        payload[7] = adc_sample.bus_voltage;
-        payload[8] = mt6835_raw_deg;
-        payload[9] = (float)motor_sample_us;
-        payload[10] = adc_sample.bus_voltage; /* Raw codes times the nominal gain. */
-        payload[11] = foc.b_offset;
+        payload[5] = mt6835_raw_deg;
+        payload[6] = mt6835_angle_deg;
+        payload[7] = (float)(uint32_t)(sampled_duty[0] * 4200.0f + 0.5f);
+        payload[8] = (float)(uint32_t)(sampled_duty[1] * 4200.0f + 0.5f);
+        payload[9] = (float)(uint32_t)(sampled_duty[2] * 4200.0f + 0.5f);
+        payload[10] = foc.b_offset;
+        payload[11] = foc.c_offset;
         break;
     case 1: { /* Phase currents, electrical angle, PI state, pre-limit command. */
         float integral_d, integral_q;
@@ -156,7 +156,7 @@ void app_sample(void)
     bsp_motor_unlock(key);
     foc_outer_step();
     sequence = (sequence + 1u) & 0xffffffu;
-    if (bsp_usb_ready()) telemetry_usb(); /* Same 20 kHz sample, no averaging. */
+    if (bsp_usb_ready()) telemetry_usb(duty); /* PWM sampled before this cycle's write. */
 #ifdef FOC_CAPTURE
     if (capturing) {
         capture[capture_count++] = (capture_t){sequence,
@@ -213,8 +213,8 @@ static bool parse_decimal(const char *p, float *value, float limit)
 /* Foreground parser; only state changes use the short critical section. */
 bool app_command(const char *line)
 {
-    enum { STOP, CAL, CLEAR, ZERO, TORQUE, SPEED, POS, HELLO } command;
-    float value = 0.0f;
+    enum { STOP, CAL, CLEAR, ZERO, TORQUE, SPEED, POS, MOTION, HELLO } command;
+    float value = 0.0f, acceleration = 0.0f, jerk = 0.0f;
 #ifdef FOC_CAPTURE
     if (!strcmp(line, "quiet 0") || !strcmp(line, "quiet 1")) {
         quiet = line[6] == '1'; return true;
@@ -247,6 +247,21 @@ bool app_command(const char *line)
     else if (!strncmp(line, "Iq ", 3u)) { command = TORQUE; if (!parse_decimal(line + 3, &value, FOC_CURRENT_MAX)) return false; }
     else if (!strncmp(line, "rpm ", 4u)) { command = SPEED; if (!parse_decimal(line + 4, &value, FOC_SPEED_MAX)) return false; }
     else if (!strncmp(line, "pos ", 4u)) { command = POS; if (!parse_decimal(line + 4, &value, 1e6f)) return false; }
+    else if (!strncmp(line, "motion ", 7u)) {
+        char fields[32];
+        strncpy(fields, line + 7, sizeof fields);
+        fields[sizeof fields - 1u] = '\0';
+        char *a = strchr(fields, ' ');
+        if (!a) return false;
+        *a++ = '\0';
+        char *j = strchr(a, ' ');
+        if (!j) return false;
+        *j++ = '\0';
+        if (!parse_decimal(fields, &value, FOC_SPEED_MAX) ||
+            !parse_decimal(a, &acceleration, 100000.0f) ||
+            !parse_decimal(j, &jerk, 1000000.0f)) return false;
+        command = MOTION;
+    }
     else if (!strncmp(line, "send ", 5u) && line[5] >= '0' && line[5] <= '3' && !line[6]) {
         telemetry_group = (uint8_t)(line[5] - '0');
         return true;
@@ -263,6 +278,7 @@ bool app_command(const char *line)
     case TORQUE: ok = control_torque(value); break;
     case SPEED: ok = control_speed(value); break;
     case POS: ok = control_position(value); break;
+    case MOTION: ok = control_motion(value, acceleration, jerk); break;
     case ZERO: ok = control_zero(); break;
     case CAL: ok = foc_calibrate(); break;
     case HELLO: break; /* No state change; the caller prints the banner. */

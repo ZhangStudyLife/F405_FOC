@@ -194,10 +194,10 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         foc.state = aligning ? FOC_CALIBRATE : FOC_RUN;
     }
     if (foc.state == FOC_RUN) {
-        /* 1 A/s command ramp, slewed at the fixed 20 kHz control rate. */
+        /* 10 A/s command ramp, slewed at the fixed 20 kHz control rate. */
         float step = foc.command - previous_command;
-        if (step > 5e-5f) step = 5e-5f;
-        else if (step < -5e-5f) step = -5e-5f;
+        if (step > 5e-4f) step = 5e-4f;
+        else if (step < -5e-4f) step = -5e-4f;
         previous_command += step;
         foc.iq_ref = previous_command;
         /* The 1 kHz outer loop, when scheduled, replaces the reference. It only

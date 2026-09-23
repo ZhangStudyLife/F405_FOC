@@ -9,8 +9,8 @@
 |---|---|---|---|
 | `test_mt6835_crc.c` | 主机测试 | 当前 | 磁编解码：边界角度、独立逐位 CRC 参考、全部单比特损坏、传感器故障状态、历史真实帧 |
 | `test_justfloat.c` | 主机测试 | 当前 | 两种传输的帧字节：精确帧、参数单次求值、16 通道上限、NaN、发送被拒 |
-| `test_app_usb.c` | 主机测试 | 当前 | 真实 `app.c` + `foc.c` + `control.c`：四组 12 float 帧布局、头字位打包、`send` 切组、`Iq`/`rpm`/`pos`/`zero`/`hello` 解析与拒绝、CR/LF/CRLF、拆包/粘包、UART/USB 独立组行、会话切换、20,000 帧、1 A/s 斜坡、外环参考替换 |
-| `test_control_pid.c` | 主机测试 | 当前 | 真实 `control.c` + 一阶被控对象：速度跟踪（±）、输出限幅与抗饱和、200 ms 主机看门狗、多圈位置收敛与反向、`zero`、`stop` 复位 |
+| `test_app_usb.c` | 主机测试 | 当前 | 真实 `app.c` + `foc.c` + `control.c`：四组 12 float 帧布局、头字位打包、`send` 切组、`Iq`/`rpm`/`pos`/`zero`/`hello` 解析与拒绝、CR/LF/CRLF、拆包/粘包、UART/USB 独立组行、会话切换、20,000 帧、10 A/s 斜坡与 motion 指令、外环参考替换 |
+| `test_control_pid.c` | 主机测试 | 当前 | 真实 `control.c` + 一阶被控对象：速度跟踪（±）、输出限幅与抗饱和、目标保持、多圈位置收敛与反向、`zero`、`stop` 复位 |
 | `test_usb_queue.c` | 主机测试 | 当前 | 直接包含生产 `bsp_usb.c`：20,000 帧逐字节比对、BUSY 重试、缓冲所有权、环形/计数器回绕、溢出锁存、复位统计、RX 背压（用 `usb_stubs/` 替代 CDC 回调） |
 | `test_foc_recalibration.c` | 主机测试 | 当前 | 校准状态机回归：零偏采集 → `foc_calibrate()` → 对齐 → `FOC_SAVE`，方向判定与 600 转滑行 |
 | `capture_usb.py` | PC 脚本 | 当前 | 单组 20 kHz 流长跑校验：DTR 会话排空、帧尾对齐、`seq` 差 1 与 µs 差 50 的连续性、速率 19,800..20,200 帧/s |

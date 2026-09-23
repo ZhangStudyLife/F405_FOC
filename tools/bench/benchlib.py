@@ -7,9 +7,10 @@ with ``send X``. See README.md for the per-group channel map.
 """
 import argparse
 import json
-import math
 import os
+import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -28,11 +29,13 @@ SAMPLE_US = 50
 T_24_MASK = 0xFFFFFF
 SERIAL_SPEED = 2000000
 USB_VID_PID = (0x0483, 0x5740)
+DATA_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "data"))
+SEVEN_ZIP = shutil.which("7z") or r"C:\Program Files\7-Zip\7z.exe"
 
 # Channels 2..11 per logging group, exactly as App/Control/app.c fills them.
 GROUP_CHANNELS = {
-    0: ["adc_raw_b", "adc_raw_c", "adc_raw_bus", "v_b", "v_c", "v_bus",
-        "angle_raw_deg", "sample_us", "bus_v_nominal", "b_offset"],
+    0: ["adc_raw_b", "adc_raw_c", "adc_raw_bus", "angle_raw_deg", "angle_deg",
+        "sampled_ccr_a", "sampled_ccr_b", "sampled_ccr_c", "b_offset", "c_offset"],
     1: ["ib", "ic", "elec_deg", "iq_ref", "integral_d", "integral_q",
         "ud", "uq", "b_offset", "c_offset"],
     2: ["ud", "uq", "ccr_a", "ccr_b", "ccr_c", "duty_a", "duty_b", "duty_c",
@@ -152,14 +155,28 @@ def parse_file(path):
         raise ValueError(f"{path}: no frame boundary found; wrong layout or empty capture")
     usable = ((len(raw) - offset) // FRAME_BYTES) * FRAME_BYTES
     body = raw[offset:offset + usable].reshape(-1, FRAME_BYTES)
-    if not terminators_ok(body):
-        raise ValueError(f"{path}: frame terminator lost; wrong layout or corrupt capture")
-    words = body[:, :CHANNELS * 4].copy().view("<u4").reshape(-1, CHANNELS)
+    if terminators_ok(body):
+        words = body[:, :CHANNELS * 4].copy().view("<u4").reshape(-1, CHANNELS)
+        dropped = len(raw) - usable
+    else:
+        # A damaged USB transfer can remove bytes inside one frame. Recover
+        # later complete frames by their terminator and group, then let the
+        # sequence/timestamp checks report the missing sample.
+        mark = TERMINATOR_WORDS
+        ends = np.flatnonzero((raw[:-3] == mark[0]) & (raw[1:-2] == mark[1]) &
+                               (raw[2:-1] == mark[2]) & (raw[3:] == mark[3]))
+        starts = ends[ends >= CHANNELS * 4] - CHANNELS * 4
+        starts = starts[raw[starts + 7] == raw[offset + 7]]
+        if len(starts) < 2:
+            raise ValueError(f"{path}: no recoverable frames")
+        body = raw[starts[:, None] + np.arange(CHANNELS * 4)]
+        words = body.copy().view("<u4").reshape(-1, CHANNELS)
+        dropped = len(raw) - len(starts) * FRAME_BYTES
     table = np.empty((words.shape[0], CHANNEL_COUNT), dtype=np.float32)
     table[:, :CHANNELS] = words.view(np.float32)
     if table.shape[1] > CHANNELS:
         table[:, CHANNELS:] = np.nan
-    return table, offset + len(raw) - offset - usable, words
+    return table, dropped, words
 
 
 def continuity(words, group):
@@ -223,6 +240,8 @@ class Link:
         self._path = None
         self._file = None
         self._thread = None
+        self.last_rx = time.monotonic()
+        self.reader_error = None
 
     def drain(self, seconds=0.25):
         deadline = time.monotonic() + seconds
@@ -247,17 +266,29 @@ class Link:
         self._path = path
         self._file = open(path, "wb", buffering=1024 * 1024)
         self._stop.clear()
+        self.last_rx = time.monotonic()
+        self.reader_error = None
         self._thread = threading.Thread(target=self._reader, daemon=True)
         self._thread.start()
 
     def _reader(self):
         write = self._file.write
         read = self.port.read
-        while not self._stop.is_set():
-            waiting = self.port.in_waiting
-            data = read(waiting if waiting else 1)
-            if data:
-                write(data)
+        try:
+            while not self._stop.is_set():
+                waiting = self.port.in_waiting
+                data = read(waiting if waiting else 1)
+                if data:
+                    write(data)
+                    self.last_rx = time.monotonic()
+        except (OSError, serial.SerialException) as error:
+            self.reader_error = error
+
+    def health(self):
+        if self.reader_error:
+            raise RuntimeError(f"USB 采集错误：{self.reader_error}")
+        if time.monotonic() - self.last_rx > 0.5:
+            raise RuntimeError("USB 采集超过 0.5 秒无帧")
 
     def stop_capture(self):
         self._stop.set()
@@ -304,36 +335,31 @@ class Scheduler:
     """Deterministic command timeline: identical wall-clock times every repeat.
 
     The value is what carries the waveform, not the exact instant it lands, so a
-    single packet per waypoint with the firmware ramp in between keeps repeated
-    runs comparable even when the host is jittery.
+    single packet per waypoint keeps repeated runs comparable.
     """
 
-    def __init__(self, link, keepalive_ms=100):
+    def __init__(self, link):
         self.link = link
-        self.keepalive = keepalive_ms / 1000.0
         self.jitter = []
+        self.sent = []
 
-    def run(self, plan, duration, tick=0.002):
+    def run(self, plan, duration, tick=0.002, health=None):
         plan = sorted(plan, key=lambda item: item[0])
         started = time.monotonic()
         deadline = started + duration
         index = 0
-        current = None
-        last_sent = -math.inf
         while True:
             now = time.monotonic()
             if now >= deadline:
+                break
+            if health and health() is False:
                 break
             elapsed_ms = (now - started) * 1000.0
             while index < len(plan) and plan[index][0] <= elapsed_ms:
                 self.link.send(plan[index][1])
                 self.jitter.append(round(elapsed_ms - plan[index][0], 3))
-                current = plan[index][1]
-                last_sent = now
+                self.sent.append((time.monotonic_ns(), plan[index][1]))
                 index += 1
-            if current is not None and now - last_sent >= self.keepalive:
-                self.link.send(current)
-                last_sent = now
             time.sleep(tick)
 
 
@@ -341,41 +367,82 @@ def wait_idle(link, timeout=8.0, threshold=20.0):
     """stop, then poll the stream until the encoder says the rotor is still."""
     link.send("stop")
     deadline = time.monotonic() + timeout
+    last = None
+    seen_at = time.monotonic()
+    reopened = False
     while time.monotonic() < deadline:
         frames = link.listen(0.1)
-        if frames and frames[-1].group == 3 and frames[-1].state == 0 and abs(frames[-1].channel(7)) < threshold:
+        if not frames:
+            if time.monotonic() - seen_at > 0.5:
+                if reopened:
+                    raise RuntimeError("USB telemetry stopped after reopening the session")
+                link.close_session()
+                link.open_session()
+                link.send("send 3")
+                link.send("stop")
+                seen_at = time.monotonic()
+                reopened = True
+            continue
+        seen_at = time.monotonic()
+        last = frames[-1]
+        if last.fault:
+            raise RuntimeError(f"motor fault {FAULT_NAMES[last.fault]} while waiting for idle")
+        if last.group == 3 and last.state == 0 and abs(last.channel(7)) < threshold:
             return True
-    return False
+    if last is None:
+        raise RuntimeError("USB telemetry stopped while waiting for idle")
+    raise RuntimeError(f"idle timeout: group={last.group} state={STATE_NAMES[last.state]} "
+                       f"rpm={last.channel(7) if last.group == 3 else 'unavailable'}")
 
 
 def archive(source, target, meta, verify=True):
-    """Stream the temporary capture into a zip next to its metadata."""
+    """Archive a complete segment; remove raw data only after verification."""
     directory = os.path.dirname(target)
     if directory:
         os.makedirs(directory, exist_ok=True)
-    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as bundle:
-        bundle.write(source, "frames.f32")
-        bundle.writestr("meta.json", json.dumps(meta, indent=2, ensure_ascii=False))
-    if verify:
-        with zipfile.ZipFile(target) as bundle:
-            stored = bundle.getinfo("frames.f32").file_size
-            if stored != meta["raw_bytes"]:
-                raise RuntimeError(f"{target}: stored {stored} bytes, "
-                                   f"captured {meta['raw_bytes']}")
-    os.remove(source)
+    if target.endswith(".7z"):
+        stage = os.path.dirname(source)
+        names = ["frames.f32", "meta.json"]
+        with open(os.path.join(stage, "meta.json"), "w", encoding="utf-8") as handle:
+            json.dump(meta, handle, ensure_ascii=False, indent=2)
+        names += [name for name in ("power.jsonl", "uart.jsonl") if os.path.exists(os.path.join(stage, name))]
+        subprocess.run([SEVEN_ZIP, "a", "-t7z", "-m0=lzma2", "-mx=9", "-y", target, *names],
+                       cwd=stage, check=True, stdout=subprocess.DEVNULL)
+        if verify:
+            subprocess.run([SEVEN_ZIP, "t", "-y", target], check=True, stdout=subprocess.DEVNULL)
+        shutil.rmtree(stage)
+    else:
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as bundle:
+            bundle.write(source, "frames.f32")
+            bundle.writestr("meta.json", json.dumps(meta, indent=2, ensure_ascii=False))
+        if verify:
+            with zipfile.ZipFile(target) as bundle:
+                stored = bundle.getinfo("frames.f32").file_size
+                if stored != meta["raw_bytes"]:
+                    raise RuntimeError(f"{target}: stored {stored} bytes, captured {meta['raw_bytes']}")
+        os.remove(source)
     return target
 
 
 def load(path):
-    """Return (matrix, metadata) from an archive, unpacking to a temp file."""
-    with zipfile.ZipFile(path) as bundle, tempfile.TemporaryDirectory(prefix="foc_bench_") as directory:
-        meta = json.loads(bundle.read("meta.json"))
-        raw = bundle.extract("frames.f32", directory)
+    """Read new 7z segments and historical ZIPs without staging on C:."""
+    os.makedirs(DATA_ROOT, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="read_", dir=DATA_ROOT) as directory:
+        if path.endswith(".7z"):
+            subprocess.run([SEVEN_ZIP, "e", "-y", "-o" + directory, path, "frames.f32", "meta.json"],
+                           check=True, stdout=subprocess.DEVNULL)
+            with open(os.path.join(directory, "meta.json"), encoding="utf-8") as handle:
+                meta = json.load(handle)
+            raw = os.path.join(directory, "frames.f32")
+        else:
+            with zipfile.ZipFile(path) as bundle:
+                meta = json.loads(bundle.read("meta.json"))
+                raw = bundle.extract("frames.f32", directory)
         table, dropped, words = parse_file(raw)
     meta["parsed_frames"] = int(len(table))
     meta["dropped_tail_bytes"] = int(dropped)
     meta["continuity"] = continuity(words, meta["group"]) if len(words) else {}
-    meta["columns"] = COLUMNS[meta["group"]]
+    meta["columns"] = meta.get("columns", COLUMNS[meta["group"]])
     return table, meta
 
 
@@ -392,7 +459,7 @@ def summarise(table, meta):
         stats["note"] = ("raw/current/voltage carry non-reconstructible physics; "
                          "tracking metrics need group 3")
         return stats
-    index = {name: position for position, name in enumerate(COLUMNS[group])}
+    index = {name: position for position, name in enumerate(meta["columns"])}
     for name in ("rpm", "rpm_tgt", "pos_deg", "pos_tgt", "iq_ref", "iq"):
         values = table[:, index[f"g{group}_{name}"]].astype(np.float64)
         finite = values[np.isfinite(values)]
@@ -428,7 +495,8 @@ def discover(seconds=1.5, sn=None):
     """Probe the board: identity plus a short stream and layout check."""
     port = find_port(sn)
     link = Link(port.device, port.serial_number)
-    path = os.path.join(tempfile.gettempdir(), "foc_bench_probe.f32")
+    os.makedirs(DATA_ROOT, exist_ok=True)
+    path = os.path.join(DATA_ROOT, "foc_bench_probe.f32")
     try:
         link.open_session()
         link.send("stop")

@@ -3,7 +3,8 @@
 #include <stdio.h>
 #include "../App/Hardware/bsp/bsp_usb.c"
 
-USBD_HandleTypeDef hUsbDeviceFS = {USBD_STATE_CONFIGURED};
+static USBD_CDC_HandleTypeDef cdc;
+USBD_HandleTypeDef hUsbDeviceFS = {USBD_STATE_CONFIGURED, &cdc};
 static uint32_t tick, rearms;
 static uint8_t *inflight;
 static uint16_t inflight_size;
@@ -17,10 +18,14 @@ uint8_t USBD_CDC_ReceivePacket(USBD_HandleTypeDef *device)
 {
     (void)device; ++rearms; return USBD_OK;
 }
+uint8_t USBD_LL_FlushEP(USBD_HandleTypeDef *device, uint8_t ep)
+{
+    (void)device; (void)ep; inflight = NULL; return USBD_OK;
+}
 uint8_t CDC_Transmit_FS(uint8_t *data, uint16_t size)
 {
     if (busy) return USBD_BUSY;
-    assert(!inflight && size && size <= 4096u);
+    assert(!inflight && size && size <= 16384u);
     inflight = data; inflight_size = size;
     return USBD_OK;
 }
