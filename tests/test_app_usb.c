@@ -170,8 +170,8 @@ int main(void)
         }
     }
     assert(frames == 20000u && foc.state == FOC_RUN);
-    /* The 2 kHz UART frame stayed 15 float + terminator while USB changed. */
-    assert(s_uart_frames == 2000u);
+    /* The 20 Hz UART frame stays 15 float + terminator while USB changes. */
+    assert(s_uart_frames == 20u);
     /* Every commutated sample was logged: one USB frame per app_sample(). */
 
     /* Reference chain: the 10 A/s ramp converges, then holds the target. */

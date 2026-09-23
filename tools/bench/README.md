@@ -5,12 +5,12 @@
 ```powershell
 download\bench.cmd run --all --dry-run
 download\bench.cmd run --mode speed --case speed_cross_zero --groups 0,1,2,3 --buses 24
-download\bench.cmd run --all --psu COM16 --uart COM14 --yes
+download\bench.cmd run --all --dry-run
 download\bench.cmd report E:\405_FOC\data\<会话时间>
 download\bench.cmd chain E:\405_FOC\data\<会话时间> speed_cross_zero
 ```
 
-`run --mode torque|speed|position` 跑该模式预设；`--case` 只选一个工况；`--include-long` 加入 60 圈位置专项。默认限值是 5 A、7000 rpm、21600°，可用 `--iq-limit`、`--rpm-limit`、`--pos-limit` 缩小。CH340 监测高速/大电流工况必需；学生电源在线时自动识别 DPS-150，多个有效设备需 `--psu` 指定。多母线全量要求学生电源，按 24→18→12 V 运行，每档设置并读回 5 A 母线限流。电机仍是空载台架；带 3D 打印负载可用 `--load-name`、`--load-mass-g`、`--load-stl`、`--load-axis` 记元数据。
+`run --mode torque|speed|position` 跑该模式预设；`--case` 只选一个工况；`--include-long` 加入 60 圈位置专项。诊断时可用 `--uart off` 关闭 CH340；实测并发打开 CH340 会使 USB 队列在数秒内溢出。默认限值是 5 A、7000 rpm、21600°，可用 `--iq-limit`、`--rpm-limit`、`--pos-limit` 缩小。全量仍要求 CH340 在线监测，目前并发链路尚未达到连续采集要求；学生电源在线时自动识别 DPS-150，多个有效设备需 `--psu` 指定。多母线全量要求学生电源，按 24→18→12 V 运行，每档设置并读回 5 A 母线限流。电机仍是空载台架；带 3D 打印负载可用 `--load-name`、`--load-mass-g`、`--load-stl`、`--load-axis` 记元数据。
 
 ## 工况
 

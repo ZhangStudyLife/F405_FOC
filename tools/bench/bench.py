@@ -171,8 +171,20 @@ def wait_speed(link, monitor, target, timeout=8.0):
     deadline = time.monotonic() + timeout
     stable = None
     while time.monotonic() < deadline:
-        sample = monitor.health()
-        if abs(sample["rpm"] - target) <= max(5.0, .1 * abs(target)):
+        if monitor:
+            sample = monitor.health()
+            actual = sample["rpm"]
+        else:
+            frames = link.listen(.05)
+            if not frames:
+                continue
+            frame = frames[-1]
+            if frame.fault:
+                raise RuntimeError(f"MCU 保护故障 {bench.FAULT_NAMES[frame.fault]}")
+            if frame.group != 3:
+                continue
+            actual = frame.channel(7)
+        if abs(actual - target) <= max(5.0, .1 * abs(target)):
             stable = stable or time.monotonic()
             if time.monotonic() - stable >= .2:
                 return
@@ -269,7 +281,8 @@ def run_case(link, out_dir, experiment, group, limits, monitor, supply=None,
             wait_speed(link, monitor, experiment.initial_rpm)
         link.send(f"send {group}")
         link.drain(.15)
-        monitor.start_log(os.path.join(stage, "uart.jsonl"))
+        if monitor:
+            monitor.start_log(os.path.join(stage, "uart.jsonl"))
         if supply:
             supply.start_log(os.path.join(stage, "power.jsonl"))
         link.start_capture(raw)
@@ -277,11 +290,12 @@ def run_case(link, out_dir, experiment, group, limits, monitor, supply=None,
         time.sleep(WARMUP_MS / 1000)
         def health():
             link.health()
-            sample = monitor.health()
+            if monitor:
+                sample = monitor.health()
+                if experiment.stop_at_rpm and abs(sample["rpm"]) >= experiment.stop_at_rpm:
+                    return False
             if supply:
                 supply.health()
-            if experiment.stop_at_rpm and abs(sample["rpm"]) >= experiment.stop_at_rpm:
-                return False
         scheduler.run(experiment.plan, experiment.duration_s, health=health)
         link.send("stop")
         time.sleep(.2)
@@ -289,13 +303,15 @@ def run_case(link, out_dir, experiment, group, limits, monitor, supply=None,
         error = str(exc)
     finally:
         try:
-            monitor.send("stop")
+            if monitor:
+                monitor.send("stop")
             link.send("stop")
         except (OSError, RuntimeError):
             pass
         if capturing:
             link.stop_capture()
-        monitor.stop_log()
+        if monitor:
+            monitor.stop_log()
         if supply:
             supply.stop_log()
         try:
@@ -413,7 +429,8 @@ def preflight(link, monitor):
         wait_speed(link, monitor, 250.0, timeout=8.0)
         return True
     finally:
-        monitor.send("stop")
+        if monitor:
+            monitor.send("stop")
         link.send("stop")
         link.close_session()
 
@@ -421,7 +438,8 @@ def preflight(link, monitor):
 def recover(link, monitor, supply, args, voltage, error):
     print(f"故障：{error}；正在停机并尝试一次恢复")
     try:
-        monitor.send("stop")
+        if monitor:
+            monitor.send("stop")
     except Exception:
         pass
     try:
@@ -490,6 +508,8 @@ def command_run(args):
                 work.append((voltage, experiment))
     if not work:
         raise RuntimeError("没有匹配的工况；先用 run --all --dry-run 查看名称")
+    if args.all and args.uart and args.uart.lower() in ("off", "none") and not args.dry_run:
+        raise RuntimeError("全量测试需要 CH340 在线监测；当前 USB 与 CH340 并发断流，须先修复链路")
     total = sum(case.duration_s + (5 if case.initial_rpm else 1.5) for _, case in work) * len(groups) * args.repeat
     print(f"{len(work)} 个工况 × {len(groups)} 组 × {args.repeat} 次，预计约 {total/60:.1f} 分钟")
     if args.dry_run:
@@ -513,14 +533,16 @@ def command_run(args):
     monitor = None
     link = None
     started = time.monotonic()
+    failed = False
     try:
         supply = select_supply(args)
         if not supply and len(voltages) > 1:
             raise RuntimeError("多母线全量测试需要指定并连接学生电源")
-        monitor = devices.UartMonitor(args.uart)
+        if not args.uart or args.uart.lower() not in ("off", "none"):
+            monitor = devices.UartMonitor(args.uart)
         port = bench.find_port(args.sn)
         link = bench.Link(port.device, port.serial_number)
-        print(f"FOC {port.device}，CH340 {monitor.port.port}，电源 {supply.port.port if supply else '未连接'}")
+        print(f"FOC {port.device}，CH340 {monitor.port.port if monitor else '关闭'}，电源 {supply.port.port if supply else '未连接'}")
         current_voltage = None
         rotation_ok = None
         for voltage, experiment in work:
@@ -560,9 +582,12 @@ def command_run(args):
                                 "attempt": attempt})
                             save()
                             if attempt:
-                                raise
+                                raise RuntimeError("本段重试仍失败，已保存残段并停止测试") from exc
                             link = recover(link, monitor, supply, args, voltage, exc)
                     save()
+    except RuntimeError as exc:
+        failed = True
+        print(f"测试中止：{exc}")
     except KeyboardInterrupt:
         print("用户中止，正在停机")
     finally:
@@ -578,17 +603,30 @@ def command_run(args):
                 pass
             link.close()
         if supply:
+            supply_port = supply.port.port
             try:
                 supply.output(False)
-            finally:
+            except Exception as exc:
+                print(f"电源关闭读回超时：{exc}；重新连接核实")
+            try:
                 supply.close()
+            except Exception:
+                pass
+            try:
+                check = devices.StudentPower(supply_port)
+                if check.state.output_enabled:
+                    check.output(False)
+                print(f"电源最终状态：输出={'开' if check.state.output_enabled else '关'}，保护={check.state.protection_status}")
+                check.close()
+            except Exception as exc:
+                print(f"无法重新核实电源状态：{exc}")
         if monitor:
             monitor.close()
         session["elapsed_s"] = round(time.monotonic() - started, 2)
         session["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
         save()
         print(f"全程耗时 {session['elapsed_s']:.2f} 秒；数据：{out_dir}")
-    return 0
+    return int(failed)
 
 
 def command_report(args):
@@ -814,7 +852,7 @@ def main():
     run.add_argument("--out", default=bench.DATA_ROOT)
     run.add_argument("--sn")
     run.add_argument("--stlink-sn")
-    run.add_argument("--uart", help="CH340 串口")
+    run.add_argument("--uart", help="CH340 串口；USB 高速全量测试可填 off 关闭并发串口")
     run.add_argument("--psu", help="学生电源串口；off 表示不连接")
     run.add_argument("--include-long", action="store_true", help="加入 60 圈位置专项")
     run.add_argument("--load-name", default="空载")

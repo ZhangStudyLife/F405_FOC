@@ -240,6 +240,7 @@ class Link:
         self._path = None
         self._file = None
         self._thread = None
+        self._read_buffer = bytearray(65536)
         self.last_rx = time.monotonic()
         self.reader_error = None
 
@@ -273,13 +274,12 @@ class Link:
 
     def _reader(self):
         write = self._file.write
-        read = self.port.read
+        readinto = self.port.readinto
         try:
             while not self._stop.is_set():
-                waiting = self.port.in_waiting
-                data = read(waiting if waiting else 1)
-                if data:
-                    write(data)
+                count = readinto(self._read_buffer)
+                if count:
+                    write(memoryview(self._read_buffer)[:count])
                     self.last_rx = time.monotonic()
         except (OSError, serial.SerialException) as error:
             self.reader_error = error

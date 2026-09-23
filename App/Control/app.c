@@ -22,7 +22,7 @@ static volatile uint8_t telemetry_group;
 static float s_usb_frame[FOC_FRAME_CHANNELS + 1u];
 
 static volatile uint32_t last_frame;
-static volatile uint8_t divider;
+static volatile uint16_t divider;
 static uint32_t sequence;
 #ifdef FOC_CAPTURE
 /* Debug build only; frozen before foreground export. No DMA reads this array. */
@@ -170,14 +170,14 @@ void app_sample(void)
         }
     }
 #endif
-    if (++divider == 10u) {
+    if (++divider == 1000u) {
         divider = 0u;
         last_frame = bsp_uart_millis();
 #ifdef FOC_CAPTURE
         if (!dumping && !quiet)
 #endif
         {
-            /* 2 kHz, 64 bytes: 64% of 2 Mbps, including 8N1 overhead. */
+            /* 20 Hz, 64 bytes: safety monitor; USB carries the 20 kHz dataset. */
             const float frame[] = {foc.id, foc.iq, adc_sample.b_voltage, adc_sample.c_voltage,
                 (float)sequence, foc.rpm, adc_sample.bus_voltage, foc.iq_ref, foc.electrical_deg,
                 foc.ud, foc.uq, duty[0], duty[1], duty[2],
