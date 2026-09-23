@@ -25,8 +25,8 @@ extern volatile uint32_t app_command_rejected;
 static const char *uart_input, *usb_input;
 static size_t uart_left, usb_left;
 static unsigned frames;
-/* The 12 float channels; the JustFloat terminator is added by the driver. */
-static uint32_t latest[12];
+/* The 12 float channels and the JustFloat terminator from app.c. */
+static uint32_t latest[13];
 
 uint32_t bsp_motor_lock(void) { return 0u; }
 void bsp_motor_unlock(uint32_t key) { (void)key; }
@@ -57,7 +57,8 @@ bool bsp_usb_ready(void) { return true; }
 void bsp_usb_poll(void) {}
 bool bsp_usb_write(const void *data, size_t size)
 {
-    assert(size == 12u * sizeof(float));
+    assert(size == 13u * sizeof(float));
+    assert(isinf(((const float *)data)[12]));
     memcpy(latest, data, size); ++frames; return true;
 }
 static size_t read_input(void *data, size_t size, const char **input, size_t *left)
@@ -165,7 +166,7 @@ int main(void)
         } else {
             assert(channel(3) == foc.command && channel(10) == 0.0f);
             assert(channel(7) == foc.rpm && channel(8) == control_speed_target());
-            assert(channel(9) == control_speed_rpm() && channel(11) == adc_sample.bus_voltage);
+            assert(channel(9) == foc.iq && channel(11) == adc_sample.bus_voltage);
         }
     }
     assert(frames == 20000u && foc.state == FOC_RUN);
@@ -186,7 +187,7 @@ int main(void)
     motor_sample_us = (motor_sample_us + 50u) & 0xffffffu;
     app_sample(); /* The outer loop runs once per millisecond of samples. */
     assert(index_word() >> 24 == 3u);
-    assert(channel(2) == foc.iq_ref && channel(10) == control_iq_ref());
+    assert(channel(2) == foc.iq_ref && channel(9) == foc.iq);
     assert(channel(11) == adc_sample.bus_voltage && channel(3) == foc.command);
 
     usb("stop\r"); assert(foc.state == FOC_IDLE && foc.command == 0.0f && motor_mode == MOTOR_OFF);

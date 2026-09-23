@@ -205,7 +205,6 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
            on the nineteen samples in between. */
         uint32_t outer_fault = control_fault();
         if (outer_fault) { foc_trip(outer_fault); return; }
-        control_step(motor_sample_us, position);
         if (control_mode() != CONTROL_TORQUE && control_scheduled())
             foc.iq_ref = control_iq_ref();
         /* 600 Hz PI, R=.12 ohm, L=50 uH; no feedback low-pass.
@@ -262,4 +261,9 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         sincos_fast(theta, &s, &c);
         foc_modulate(ud * c, ud * s, bus_voltage, foc.duty);
     }
+}
+
+void foc_outer_step(void)
+{
+    if (foc.state == FOC_RUN) control_step(motor_sample_us, position);
 }

@@ -9,29 +9,17 @@
    Tuning order: speed Kp first until it tracks without oscillating, then speed
    Ki to remove the steady-state error, then position Kp. */
 #define SPEED_KP 0.005f         /* A/RPM. 100 RPM error -> 0.5 A. */
-#define SPEED_KI 0.02f          /* A/(RPM*s). */
-/* RPM per degree. The position loop is solved by the speed loop, so its gain
-   sets the damping: at 20 RPM/deg the pair is underdamped (about 0.26), at
-   8 RPM/deg it is comfortably damped and 10 deg still commands 80 RPM. */
-#define POSITION_KP 8.0f
-#define POSITION_KI 0.0f        /* RPM/(degree*s); keep 0 to avoid windup. */
-#define POSITION_KI_LIMIT 1000.0f
+#define SPEED_KI 0.01f          /* A/(RPM*s). */
+#define POSITION_KP 4.0f       /* RPM per degree. */
 #define CONTROL_BANDWIDTH 0.1f  /* Integrator back-calculation gain. */
 #define CONTROL_PERIOD_US 1000u /* Outer-loop period; runs once per millisecond. */
 #define CONTROL_JUMP_US 4000u   /* Gap above this is a discontinuity, not a dt. */
 #define CONTROL_COMMAND_MS 200u /* Stop if the host stops sending mode targets. */
-/* First-order speed filter, per millisecond tick. The encoder resolves
-   360/2^21 degrees, so the 1 ms position difference has a 86 RPM quantisation
-   step: at alpha = 0.2 the filter runs at 100 Hz, which removes most of that
-   while costing 11 degrees of phase at 1 kHz. Raise it for a faster, noisier
-   loop or lower it for a smoother, slower one. */
-#define CONTROL_SPEED_FILTER 0.2f
-
 static uint32_t mode, fault;
-static float position, reference, speed, speed_target, position_target, position_error;
-static float integral_speed, integral_position, last_deg, previous_position;
+static float position, reference, speed, speed_target, position_target;
+static float integral_speed, last_deg;
 static uint32_t previous_tick, command_ms;
-static bool tracking, timed, commanded;
+static bool tracking, commanded;
 
 float control_iq_ref(void) { return reference; }
 uint32_t control_mode(void) { return mode; }
@@ -52,8 +40,8 @@ void control_stop(void)
     mode = CONTROL_TORQUE;
     fault = 0u;
     commanded = false;
-    reference = speed_target = position_target = position_error = 0.0f;
-    integral_speed = integral_position = 0.0f;
+    reference = speed_target = position_target = 0.0f;
+    integral_speed = 0.0f;
 }
 
 static void accept(void)
@@ -88,7 +76,7 @@ static bool go(void)
    command after a long silence drops the integrators instead. */
 static bool continuous(uint32_t wanted)
 {
-    return mode == wanted && (uint32_t)(bsp_uart_millis() - command_ms) < 50u;
+    return mode == wanted && (uint32_t)(bsp_uart_millis() - command_ms) < CONTROL_COMMAND_MS;
 }
 
 static bool start(uint32_t wanted, float target)
@@ -96,7 +84,7 @@ static bool start(uint32_t wanted, float target)
     if (!arm(wanted, target)) return false;
     if (!foc.calibrated || !foc.zero_ready) return false;
     if (foc.state != FOC_IDLE && foc.state != FOC_RUN && foc.state != FOC_PRECHARGE) return false;
-    if (!continuous(wanted)) integral_speed = integral_position = 0.0f;
+    if (!continuous(wanted)) integral_speed = 0.0f;
     if (!go()) return false;
     mode = wanted;
     accept();
@@ -137,32 +125,27 @@ bool control_zero(void)
 {
     if (foc.state != FOC_IDLE || fabsf(foc.rpm) >= 5.0f) return false;
     position = 0.0f;
+    tracking = false;
     return true;
 }
 
-/* Speed PI with the position P above it, or the plain reference in torque mode.
-   Speed comes from the position difference over one outer period: the encoder
-   resolves 360/2^21 degrees, so a whole millisecond of travel is well above the
-   quantisation floor, and unlike foc.rpm there is no slow filter in the way. */
+/* Speed PI with the position P above it. foc.rpm is already encoder-filtered. */
 static float outer_output(float dt)
 {
     if (mode == CONTROL_POSITION) {
-        position_error = position_target - position;
-        float omega = POSITION_KP * position_error + integral_position;
-        float ceiling = FOC_SPEED_MAX * 0.9f;
+        float omega = POSITION_KP * (position_target - position);
+        float ceiling = 100.0f;
         if (omega > ceiling) omega = ceiling;
         if (omega < -ceiling) omega = -ceiling;
-        integral_position += POSITION_KI * position_error * dt;
-        if (integral_position > POSITION_KI_LIMIT) integral_position = POSITION_KI_LIMIT;
-        if (integral_position < -POSITION_KI_LIMIT) integral_position = -POSITION_KI_LIMIT;
         speed_target = omega;
-    } else position_error = 0.0f;
+    }
     float error = speed_target - speed;
     float wanted = SPEED_KP * error + integral_speed;
     float limited = wanted;
     if (limited > FOC_CURRENT_MAX) limited = FOC_CURRENT_MAX;
     if (limited < -FOC_CURRENT_MAX) limited = -FOC_CURRENT_MAX;
-    integral_speed += SPEED_KI * error * dt + CONTROL_BANDWIDTH * (limited - wanted);
+    integral_speed += SPEED_KI * error * dt;
+    if (limited != wanted) integral_speed += CONTROL_BANDWIDTH * (limited - wanted);
     if (integral_speed > FOC_CURRENT_MAX) integral_speed = FOC_CURRENT_MAX;
     if (integral_speed < -FOC_CURRENT_MAX) integral_speed = -FOC_CURRENT_MAX;
     return limited;
@@ -172,32 +155,25 @@ void control_step(uint32_t sample_us, float mechanical_deg)
 {
     if (foc.fault && !fault) fault = foc.fault; /* A trip latches this loop too. */
     if (isnan(mechanical_deg)) return;
-    /* Unwrap every 20 kHz call so no single update can alias past half a turn. */
+    uint32_t elapsed = (sample_us - previous_tick) & 0xffffffu;
+    if (elapsed < CONTROL_PERIOD_US) return;
+    /* At the 9400 RPM limit, one millisecond moves less than 57 degrees. */
     if (!tracking) { last_deg = mechanical_deg; tracking = true; }
-    float step_deg = mechanical_deg - last_deg;
-    if (step_deg > 180.0f) step_deg -= 360.0f;
-    if (step_deg < -180.0f) step_deg += 360.0f;
+    float step_deg = mechanical_deg - last_deg; /* foc_step already unwraps. */
     last_deg = mechanical_deg;
     position += step_deg;
-    if ((uint32_t)(sample_us - previous_tick) < CONTROL_PERIOD_US) return;
-    uint32_t elapsed = (uint32_t)(sample_us - previous_tick);
     if (elapsed > CONTROL_JUMP_US) {
         previous_tick = sample_us; /* Resynchronise without integrating the gap. */
         return;
     }
     float dt = (float)elapsed * 1e-6f;
     previous_tick = sample_us;
-    if (timed) {
-        float raw = ((position - previous_position) / dt) * (60.0f / 360.0f);
-        speed += CONTROL_SPEED_FILTER * (raw - speed);
-    }
-    previous_position = position;
-    timed = true;
-    if (!commanded) return; /* Nothing scheduled: the current loop holds iq_ref. */
+    speed = foc.rpm;
+    if (!commanded || mode == CONTROL_TORQUE) return; /* Torque keeps its own Iq reference. */
     /* The outer loops hold a computed reference, so they stop when the host
        falls silent. Torque mode keeps the historical `Iq` semantics and has no
        watchdog. A host that comes back clears the watchdog fault by itself. */
-    if (mode != CONTROL_TORQUE && !control_scheduled()) { fault = FOC_UART; return; }
+    if (!control_scheduled()) { fault = FOC_UART; return; }
     if (fault == FOC_UART) fault = 0u;
     reference = outer_output(dt);
 }

@@ -1,8 +1,5 @@
-/* Outer-loop regression: the real 1 kHz scheduler against a first-order plant.
-   The plant is a torque constant and an inertia, so the settling behaviour is
-   analytic rather than fitted to the controller under test. Every long run
-   refreshes the target every 100 ms, which is how the host keeps the watchdog
-   satisfied; a silent host is a separate, deliberate case below. */
+/* Outer-loop regression against the measured 24 V no-load plant. Every long
+   run refreshes the target every 100 ms, as the host does for the watchdog. */
 #include "bsp_uart.h"
 #include "control.h"
 #include "foc.h"
@@ -11,16 +8,12 @@
 #include <math.h>
 #include <stdio.h>
 
-/* 5010-KV360: Kt = 60/(2*pi*360) N*m/A. The rotor inertia is not in the motor
-   documentation, so the test uses a small outrunner value; it only sets the
-   timescale, and it is what makes the settling measurements below meaningful. */
-#define KT 0.0265258238f
-#define INERTIA 5e-6f
 #define RADS_PER_RPM 0.1047197551f
 
 volatile float mt6835_angle_deg = NAN, mt6835_raw_deg = NAN, mt6835_sample_delay;
 volatile uint32_t mt6835_errors;
 static uint32_t s_millis;
+static unsigned tick20;
 
 uint32_t bsp_uart_millis(void) { return s_millis; }
 void bsp_uart_tick(void) {}
@@ -28,8 +21,7 @@ bool bsp_uart_write(const void *data, size_t size) { (void)data; return size != 
 
 static float angle = 30.0f, rpm;
 static uint32_t sample_us;
-/* Independent multi-turn ground truth: the same unwrap as control.c, but driven
-   here from the plant's own angle rather than from the loop under test. */
+/* Independent multi-turn ground truth, fed to control_step as foc_step does. */
 static float plant_position, previous_plant_angle;
 
 /* One 20 kHz control period. torque_scale is the plant's authority, so a test
@@ -37,28 +29,33 @@ static float plant_position, previous_plant_angle;
 static void step(float torque_scale)
 {
     const float dt = 50e-6f;
-    rpm += (KT * foc.iq_ref * torque_scale / INERTIA) * RADS_PER_RPM * dt;
+    float omega = rpm * RADS_PER_RPM;
+    float drive = 1230.0f * foc.iq_ref * torque_scale - 0.0654f * omega - 0.27f;
+    if (fabsf(omega) < 1e-4f && fabsf(drive) <= 192.5f) omega = 0.0f;
+    else omega += (drive - 192.5f * (omega > 0.0f ? 1.0f : omega < 0.0f ? -1.0f : copysignf(1.0f, drive))) * dt;
+    rpm = omega / RADS_PER_RPM;
     angle += rpm * 6.0f * dt; /* RPM -> degrees per second. */
     if (angle >= 360.0f) angle -= 360.0f;
     if (angle < 0.0f) angle += 360.0f;
-    if (sample_us % 1000u == 0u) ++s_millis; /* Monotonic, like HAL_GetTick. */
+    if (++tick20 == 20u) { ++s_millis; tick20 = 0u; } /* Monotonic, like HAL_GetTick. */
     /* The real foc_step() ends the two-millisecond PRECHARGE interlock; the
        stub does not run the current loop, so the test releases it by time. */
     if (foc.state == FOC_PRECHARGE && s_millis >= 2u) foc.state = FOC_RUN;
-    control_step(sample_us, angle);
-    if (control_fault()) return;
     float step_deg = angle - previous_plant_angle;
     if (step_deg > 180.0f) step_deg -= 360.0f;
     if (step_deg < -180.0f) step_deg += 360.0f;
     plant_position += step_deg;
     previous_plant_angle = angle;
+    foc.rpm = rpm;
+    if (foc.state == FOC_RUN) control_step(sample_us, plant_position);
+    if (control_fault()) return;
     if (control_mode() != CONTROL_TORQUE && control_scheduled()) foc.iq_ref = control_iq_ref();
 }
 
 static void run(unsigned milliseconds, float torque_scale)
 {
     for (unsigned n = 0; n < milliseconds * 20u; ++n) {
-        sample_us = (sample_us + 50u) % 1000000u;
+        sample_us = (sample_us + 50u) & 0xffffffu;
         step(torque_scale);
     }
 }
@@ -75,6 +72,7 @@ static void reset(void)
     plant_position = 0.0f;
     previous_plant_angle = angle; /* Must match, or the first delta is bogus. */
     s_millis = 0u;
+    tick20 = 0u;
     control_stop();
     /* Both sides agree on the origin before each case: a real run does this
        with `zero` while the drive is idle, which is also what gates it. */
@@ -177,6 +175,25 @@ int main(void)
     assert(control_mode() == CONTROL_TORQUE && control_iq_ref() == 0.0f);
     assert(control_speed_target() == 0.0f && control_position_target() == 0.0f);
     assert(!control_scheduled());
+    /* foc_step keeps unwrapping while idle. Restart after a long coast without
+       treating all that idle travel as one millisecond of velocity. */
+    reset();
+    assert(control_speed(50.0f));
+    run(20u, 0.0f);
+    control_stop();
+    foc.state = FOC_IDLE;
+    float before_coast = control_position_deg();
+    plant_position += 10000.0f;
+    foc.rpm = 0.0f;
+    assert(control_speed(50.0f));
+    foc.state = FOC_RUN;
+    for (unsigned n = 0; n < 5; ++n) {
+        sample_us = (sample_us + 1000u) & 0xffffffu;
+        control_step(sample_us, plant_position);
+    }
+    assert(fabsf(control_position_deg() - before_coast - 10000.0f) < 1.0f);
+    assert(fabsf(control_speed_rpm()) < 100.0f);
+    assert(fabsf(control_iq_ref()) < 1.0f);
     puts("PASS: speed tracking, output limit, host watchdog, position convergence, zero, stop");
     return 0;
 }

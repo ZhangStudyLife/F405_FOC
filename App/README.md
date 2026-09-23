@@ -20,14 +20,14 @@
 
 应用和协议不依赖 HAL；硬件驱动不调用应用。`Core/Src/main.c` 只调用 `app_init()`，主循环处理命令/校准保存后休眠；`stm32f4xx_it.c` 连接各驱动和应用回调。自写代码只使用生成文件的 USER CODE 块，其他代码保持 CubeMX 所有权。
 
-USB 端口置 DTR 后，每个采样回调通过一次 `bsp_usb_write` 回传 **12 个小端 float32 + JustFloat 帧尾，共 52 字节**，960,000 B/s。下标 0 是打包时间戳/状态字，下标 1 是打包序号/组号，下标 2..11 由 `send X` 选定的日志组决定：
+USB 端口置 DTR 后，每个采样回调通过一次 `bsp_usb_write` 回传 **12 个小端 float32 + JustFloat 帧尾，共 52 字节**，1,040,000 B/s。下标 0 是打包时间戳/状态字，下标 1 是打包序号/组号，下标 2..11 由 `send X` 选定的日志组决定：
 
 | 组 | 内容 |
 |---|---|
 | 0 | B/C/母线 ADC 原始码值、三路电压、编码器**未修正**角度、采样微秒、`b_offset` |
 | 1 | Ib/Ic、电角度、`iq_ref`、PI 积分器 `integral_d/q`、`ud/uq`、零偏 |
 | 2 | `ud/uq`、本周期生效的 CCR/占空比、采样窗口电压上限、`Vbus/√3` 线性上限 |
-| 3 | Iq 参考链、多圈 `pos_deg`、目标位置、编码器 `rpm`、目标转速、外环输出、控制模式 |
+| 3 | Iq 参考与实测值、多圈 `pos_deg`、目标位置、编码器 `rpm`、目标转速、控制模式 |
 
 通道表、位打包、时间/丢帧判据、分析配方见 [tools/bench/README.md](../tools/bench/README.md)。
 
@@ -38,10 +38,10 @@ UART 封装接口为 `uart_justfloat`，仍是 2 kHz、15 float。USB 需要 PC 
 `Iq <A>` / `rpm <v>` / `pos <deg>` 三条命令**命令即切模式**，无需额外 mode 命令。三者都通过同一个 PRECHARGE 联锁启动（2 ms 三低侧导通），`stop` 是唯一的下降路径。
 
 - **Torque**：目标 Iq，与既有语义一致；`Iq 0` 待机时不启动，运行中保持零目标电流环。参考按 **1 A/s** 从上一个值斜坡到新目标（20 kHz 定步长），`stop` 清零并取消未完成的斜坡。
-- **Speed**：1 kHz 速度环，目标 ±9400 RPM。速度由 1 kHz 上的多圈位置差分得到（编码器 21 bit，1 ms 内行程远高于量化底噪），再过一阶 100 Hz 滤波（`CONTROL_SPEED_FILTER`）；**不用 `foc.rpm`**，它的 1.57 Hz 低通在 1 kHz 外环里相位滞后过大。
-- **Position**：位置环 P 输出转速目标，再串速度环 PI，最终输出 Iq 参考。目标为**绝对多圈角度**（如 `pos 720.00` 表示一圈半之外的两整圈），`zero` 把当前位置定义为 0°（需停机且静止）。位置增益取 8 RPM/°：更高的 20 RPM/° 会让位置-速度这对在解析模型下欠阻尼（阻尼比约 0.26）。
+- **Speed**：1 kHz 速度环，目标 ±9400 RPM。复用 `foc.rpm` 的 20 kHz 编码器低通测速；外环计算在本周期 PWM 提交后进行，下一电流周期使用其 Iq 参考。
+- **Position**：位置环 P 输出转速目标，再串速度环 PI，最终输出 Iq 参考。目标为**绝对多圈角度**（如 `pos 720.00` 表示两整圈），`zero` 把当前位置定义为 0°（需停机且静止）。当前增益 4 RPM/°，位置模式目标转速限幅 ±100 RPM。
 
-参数在 `App/Control/control.c` 顶部常量块：`SPEED_KP`、`SPEED_KI`、`POSITION_KP`、`POSITION_KI`（默认 0）、`CONTROL_SPEED_FILTER`。调参顺序：先 `SPEED_KP` 到跟得上且不振荡，再加 `SPEED_KI` 消静差，最后 `POSITION_KP`。外环输出限幅与 `Iq` 命令同为 ±5 A，外环不可能要求比手动 `Iq` 更大的电流。
+参数在 `App/Control/control.c` 顶部常量块：`SPEED_KP=0.005`、`SPEED_KI=0.01`、`POSITION_KP=4`。位置环只有 P 项。外环输出限幅与 `Iq` 命令同为 ±5 A。
 
 **主机看门狗**：Speed/Position 模式下若超过 **200 ms** 没有收到新目标，置 `FOC_UART` 并停机——外环握着计算出的参考值，PC 挂死必须能自停。主机回来后重新下发目标即可清除该故障。Torque 模式保持历史语义，没有该看门狗。
 

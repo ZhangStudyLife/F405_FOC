@@ -15,8 +15,8 @@ bool control_hold_position(void);     /* Re-target the last position, still sche
 bool control_zero(void);              /* Redefine the current position as 0 deg. */
 void control_stop(void);              /* stop/trip: torque mode, cleared integrators. */
 
-/* 20 kHz. Accumulates multi-turn mechanical position every call and runs the
-   outer loop once per millisecond, timed from the free-running sample counter. */
+/* Called at 20 kHz in RUN with foc_step's unwrapped mechanical position;
+   updates the outer loop once per millisecond. */
 void control_step(uint32_t sample_us, float mechanical_deg);
 
 /* Latched reason to trip the FOC state machine; read once per 20 kHz cycle. */

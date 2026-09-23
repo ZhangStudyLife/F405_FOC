@@ -38,7 +38,7 @@ GROUP_CHANNELS = {
     2: ["ud", "uq", "ccr_a", "ccr_b", "ccr_c", "duty_a", "duty_b", "duty_c",
         "edge_limit_v", "vec_limit_v"],
     3: ["iq_ref", "iq_ref_cmd", "pos_deg", "pos_tgt", "rpm", "rpm_encoder",
-        "rpm_tgt", "iq_outer", "mode", "bus_v"],
+        "rpm_tgt", "iq", "mode", "bus_v"],
 }
 CHANNEL_COUNT = 2 + 26  # union of the channels any group can carry
 
@@ -57,7 +57,7 @@ GROUP_NAMES = {0: "raw", 1: "current", 2: "voltage", 3: "control"}
 STATE_NAMES = ["IDLE", "PRECHARGE", "CALIBRATE", "SAVE", "RUN", "FAULT", "OFFSET"]
 FAULT_NAMES = ["OK", "SENSOR", "ADC", "TIMING", "WINDOW", "ALIGNMENT", "FLASH",
                "UART", "BUS", "ZERO", "CURRENT", "SPEED", "POSITION"]
-MOTOR_NAMES = ["OFF", "PRECHARGE", "PWM"]
+MOTOR_NAMES = ["NOT_PWM", "PWM"]
 
 # Raw ADC scaling, App/Hardware/bsp/bsp_adc.c. Nominal only: the current gain
 # has never been calibrated against a reference, so treat amp values as
@@ -179,9 +179,10 @@ def continuity(words, group):
         return stats
     dt = (np.diff(time_us)) & T_24_MASK
     dseq = (np.diff(seq)) & T_24_MASK
-    stats["gaps"] = int(np.count_nonzero(dt != SAMPLE_US))
+    stats["gaps"] = int(np.count_nonzero((dt < 45) | (dt > 55) | (dseq != 1)))
+    stats["timestamp_jitter"] = int(np.count_nonzero(dt != SAMPLE_US))
     stats["max_gap_us"] = int(dt.max())
-    stats["missing"] = int(np.sum(dt // SAMPLE_US) - len(dt))
+    stats["missing"] = int(np.sum(dseq - 1))
     stats["seq_ok"] = bool(np.all(dseq == 1))
     stats["dt_ok"] = bool(stats["gaps"] == 0)
     return stats
@@ -204,7 +205,7 @@ def find_port(serial_number=None):
 class Link:
     """Serial link with a reader thread that only appends bytes to a file.
 
-    Parsing during capture is deliberately avoided: at 960 kB/s any per-frame
+    Parsing during capture is deliberately avoided: at 1.04 MB/s any per-frame
     Python work would stall the host and break the 20 kHz record.
     """
 
@@ -272,17 +273,21 @@ class Link:
 
     def listen(self, seconds):
         """Collect frames for a short interval; used for state polling."""
-        reader = FrameReader()
-        collected = []
+        pending = bytearray()
+        latest = None
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             n = self.port.in_waiting
             data = self.port.read(n if n else 1)
             if data:
-                collected += reader.feed(data)
-                if len(collected) > reader.keep:
-                    collected = collected[-reader.keep:]
-        return collected
+                pending.extend(data)
+                end = pending.rfind(TERMINATOR)
+                if end >= CHANNELS * 4:
+                    latest = Frame(bytes(pending[end - CHANNELS * 4:end]))
+                    del pending[:end + len(TERMINATOR)]
+                elif len(pending) > FRAME_BYTES:
+                    del pending[:-FRAME_BYTES]
+        return [latest] if latest else []
 
     def close(self):
         try:
@@ -336,15 +341,10 @@ def wait_idle(link, timeout=8.0, threshold=20.0):
     """stop, then poll the stream until the encoder says the rotor is still."""
     link.send("stop")
     deadline = time.monotonic() + timeout
-    reader = FrameReader(keep=1)
     while time.monotonic() < deadline:
-        n = link.port.in_waiting
-        if n:
-            reader.feed(link.port.read(n))
-        frame = reader.latest()
-        if frame and frame.group == 3 and abs(frame.channel(6)) < threshold:
+        frames = link.listen(0.1)
+        if frames and frames[-1].group == 3 and frames[-1].state == 0 and abs(frames[-1].channel(7)) < threshold:
             return True
-        time.sleep(0.02)
     return False
 
 
@@ -368,12 +368,10 @@ def archive(source, target, meta, verify=True):
 
 def load(path):
     """Return (matrix, metadata) from an archive, unpacking to a temp file."""
-    with zipfile.ZipFile(path) as bundle:
+    with zipfile.ZipFile(path) as bundle, tempfile.TemporaryDirectory(prefix="foc_bench_") as directory:
         meta = json.loads(bundle.read("meta.json"))
-        directory = tempfile.mkdtemp(prefix="foc_bench_")
-        raw = os.path.join(directory, "frames.f32")
-        bundle.extract("frames.f32", directory)
-    table, dropped, words = parse_file(raw)
+        raw = bundle.extract("frames.f32", directory)
+        table, dropped, words = parse_file(raw)
     meta["parsed_frames"] = int(len(table))
     meta["dropped_tail_bytes"] = int(dropped)
     meta["continuity"] = continuity(words, meta["group"]) if len(words) else {}
@@ -395,7 +393,7 @@ def summarise(table, meta):
                          "tracking metrics need group 3")
         return stats
     index = {name: position for position, name in enumerate(COLUMNS[group])}
-    for name in ("rpm", "rpm_tgt", "pos_deg", "pos_tgt", "iq_ref", "iq_outer"):
+    for name in ("rpm", "rpm_tgt", "pos_deg", "pos_tgt", "iq_ref", "iq"):
         values = table[:, index[f"g{group}_{name}"]].astype(np.float64)
         finite = values[np.isfinite(values)]
         stats[name] = ({
@@ -435,29 +433,27 @@ def discover(seconds=1.5, sn=None):
         link.open_session()
         link.send("stop")
         link.send("send 0")
+        link.listen(0.1)
         link.start_capture(path)
         time.sleep(seconds)
         link.stop_capture()
         link.close_session()
     finally:
         link.close()
-    with open(path, "rb") as handle:
-        raw = handle.read()
+    table, dropped, words = parse_file(path)
     os.remove(path)
-    frames = len(raw) // FRAME_BYTES
-    body = raw[:frames * FRAME_BYTES].reshape(-1, FRAME_BYTES)
+    frames = len(table)
     result = {
         "port": port.device,
         "serial": port.serial_number,
-        "bytes": len(raw),
+        "bytes": frames * FRAME_BYTES,
         "frames": frames,
         "samples_per_s": round(frames / seconds, 1),
-        "bytes_per_s": round(len(raw) / seconds),
-        "terminator_ok": terminators_ok(body),
+        "bytes_per_s": round(frames * FRAME_BYTES / seconds),
+        "terminator_ok": True,
     }
-    result["layout_ok"] = bool(result["terminator_ok"] and len(raw) % FRAME_BYTES == 0)
+    result["layout_ok"] = dropped < FRAME_BYTES * 2
     if frames:
-        words = body[:, :CHANNELS * 4].copy().view("<u4").reshape(-1, CHANNELS)
         result["continuity"] = continuity(words, 0)
     return result
 

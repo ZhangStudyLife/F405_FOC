@@ -42,6 +42,7 @@ void foc_trip(uint32_t fault);
 /* Exactly 20 kHz. delay is SPI CS time minus nominal ADC hold end, seconds.
    MT6835 internal measurement delay is not calibrated. */
 void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_voltage, float encoder_delay);
+void foc_outer_step(void); /* Run the 1 kHz outer loop after this cycle's PWM write. */
 float foc_wrap(float radians);
 /* PI integrator states, volts. Read-only telemetry for the current loop; they
    are internal state a host cannot reconstruct from the other channels. */

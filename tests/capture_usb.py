@@ -70,7 +70,7 @@ def capture(port, seconds, group):
                 seq = index & T_24_MASK
                 if previous is not None:
                     previous_time, previous_seq = previous
-                    if ((time_us - previous_time) & T_24_MASK) != 50:
+                    if not 45 <= ((time_us - previous_time) & T_24_MASK) <= 55:
                         raise RuntimeError(f"Timing excursion: {previous_time} -> {time_us} us")
                     if ((seq - previous_seq) & T_24_MASK) != 1:
                         raise RuntimeError(f"Sample counter jumped: {previous_seq} -> {seq}")

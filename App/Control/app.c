@@ -19,7 +19,7 @@
 /* High-speed USB logging group, selected by `send X`; telemetry only. */
 static volatile uint8_t telemetry_group;
 /* One USB frame: two header words then the group payload, all float32. */
-static float s_usb_frame[FOC_FRAME_CHANNELS];
+static float s_usb_frame[FOC_FRAME_CHANNELS + 1u];
 
 static volatile uint32_t last_frame;
 static volatile uint8_t divider;
@@ -62,7 +62,7 @@ void app_fault(uint32_t fault)
    exactly through the float32 channel, so no separate integer frame exists. */
 static uint32_t status_word(void)
 {
-    return foc.state | (foc.fault << 3) | ((uint32_t)motor_mode << 7);
+    return foc.state | (foc.fault << 3) | ((uint32_t)(motor_mode == MOTOR_PWM) << 7);
 }
 
 /* 20 kHz USB logging: one group at a time, 12 float32 plus the JustFloat
@@ -125,11 +125,12 @@ static void telemetry_usb(void)
         payload[6] = control_speed_rpm();
         payload[7] = foc.rpm;
         payload[8] = control_speed_target();
-        payload[9] = control_iq_ref();
+        payload[9] = foc.iq;
         payload[10] = (float)control_mode();
         payload[11] = adc_sample.bus_voltage;
         break;
     }
+    s_usb_frame[FOC_FRAME_CHANNELS] = INFINITY;
     (void)bsp_usb_write(&s_usb_frame, sizeof s_usb_frame);
 }
 
@@ -153,6 +154,7 @@ void app_sample(void)
     else if (!foc_window(foc.duty) && mode == MOTOR_PWM) app_fault(FOC_WINDOW);
     else if (!bsp_motor_write(foc.duty, mode)) app_fault(FOC_TIMING);
     bsp_motor_unlock(key);
+    foc_outer_step();
     sequence = (sequence + 1u) & 0xffffffu;
     if (bsp_usb_ready()) telemetry_usb(); /* Same 20 kHz sample, no averaging. */
 #ifdef FOC_CAPTURE

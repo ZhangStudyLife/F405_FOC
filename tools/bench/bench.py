@@ -4,11 +4,11 @@
     bench.py discover                   probe the board and check the frame layout
     bench.py run --mode torque|speed|position|all [--sweep]
     bench.py report <run-directory>
-    bench.py chain <run-directory>      merge a case's four groups by timestamp
+    bench.py chain <run-directory> <case>  compare independent repeats by capture index
 
-Every case is one file per logging group: ``out/<stamp>/<mode>/<case>_g<N>.zip``
+Every case is one file per logging group: ``out/<stamp>/<case>_g<N>_r<M>.zip``
 holding ``frames.f32`` and ``meta.json``. The same case repeated on groups 0..3
-runs the identical command timeline, so the four parts can be joined offline.
+runs the same command timeline for repeatability comparison.
 """
 import argparse
 import json
@@ -28,7 +28,7 @@ import benchlib as bench
 DEFAULT_IQ_LIMIT = 0.4      # A, provisional: the current gain is uncalibrated.
 DEFAULT_RPM_LIMIT = 1000.0  # RPM. The motor rating is 9400; start far below.
 DEFAULT_POS_LIMIT = 1200.0  # degrees of absolute target, enough for three turns.
-RAMP_RATE = 20.0            # A/s of commanded reference, above the firmware's slew.
+RAMP_RATE = 1.0             # A/s of the firmware's Iq reference slew.
 WARMUP_MS = 300             # settle before the plan starts; 300 samples of 1 ms.
 KEEPALIVE_MS = 100          # must stay below the firmware's 200 ms watchdog.
 
@@ -84,8 +84,8 @@ def torque_cases(amp_steps=5, rate_steps=3, per_cel=3.0):
         for rate in rates:
             span = a / rate * 1000.0
             steps = max(2, int(span / 20.0))
-            plan = [(int(n * span / steps), f"Iq {a * n / steps:.3f}") for n in range(steps + 1)]
-            plan += [(int(span + 300 + n * span / steps), f"Iq {a * (1.0 - n / steps):.3f}")
+            plan = [(int(n * span / steps), f"Iq {a * n / steps:.2f}") for n in range(steps + 1)]
+            plan += [(int(span + 300 + n * span / steps), f"Iq {a * (1.0 - n / steps):.2f}")
                      for n in range(steps + 1)]
             cases.append(Experiment(f"ramp_{a:.2f}_{rate:g}", "torque",
                                     math.ceil((2 * span + 300) / 1000.0) + per_cel,
@@ -96,7 +96,7 @@ def torque_cases(amp_steps=5, rate_steps=3, per_cel=3.0):
         for n in range(int(duration * 1000.0 / 20.0)):
             t = n * 20.0
             value = amps[-1] * math.sin(2 * math.pi * freq * t / 1000.0)
-            plan.append((int(t), f"Iq {value:.3f}"))
+            plan.append((int(t), f"Iq {value:.2f}"))
         cases.append(Experiment(f"sin_{freq:g}", "torque", duration, plan,
                                 {"iq": amps[-1], "freq_hz": freq}, "sine torque"))
     duration = 1.0 + per_cel
@@ -105,12 +105,12 @@ def torque_cases(amp_steps=5, rate_steps=3, per_cel=3.0):
         t = n * 20.0 / 1000.0
         f0, f1 = 0.1, 50.0
         phase = 2 * math.pi * (f0 * t + (f1 - f0) * t * t / (2 * duration))
-        plan.append((int(n * 20.0), f"Iq {amps[-1] * math.sin(phase):.3f}"))
+        plan.append((int(n * 20.0), f"Iq {amps[-1] * math.sin(phase):.2f}"))
     cases.append(Experiment("chirp_0p1_50", "torque", duration, plan,
                             {"iq": amps[-1], "f0": 0.1, "f1": 50.0}, "linear chirp"))
     period = 1000.0
     duration = 1.0 + per_cel
-    plan = [(int(n * 20.0), f"Iq {amps[-1] * 0.6 * (1 if (n * 20.0 % period) < period / 2 else -1):.3f}")
+    plan = [(int(n * 20.0), f"Iq {amps[-1] * 0.6 * (1 if (n * 20.0 % period) < period / 2 else -1):.2f}")
             for n in range(int(duration * 1000.0 / 20.0))]
     cases.append(Experiment("sign_reverse", "torque", duration, plan,
                             {"iq": amps[-1] * 0.6, "period_ms": period}, "sign reversal"))
@@ -148,7 +148,7 @@ def speed_cases(amp_steps=5, rate_steps=3, per_cel=3.0):
     for freq in (0.2, 1.0, 2.0, 5.0):
         duration = 1.0 + per_cel
         amplitude = level / 3.0
-        plan = [(int(n * 20.0), f"rpm {amplitude * math.sin(2 * math.pi * freq * n * 20.0 / 1e6):.1f}")
+        plan = [(int(n * 20.0), f"rpm {amplitude * math.sin(2 * math.pi * freq * n * 20.0 / 1e3):.1f}")
                 for n in range(int(duration * 1000.0 / 20.0))]
         cases.append(Experiment(f"sin_{freq:g}", "speed", duration, plan,
                                 {"rpm": amplitude, "freq_hz": freq}, "sine speed"))
@@ -203,7 +203,7 @@ def position_cases(amp_steps=5, rate_steps=3, per_cel=3.0):
         duration = 1.0 + per_cel
         amplitude = 180.0
         plan = [(int(n * 20.0),
-                 f"pos {amplitude * math.sin(2 * math.pi * freq * n * 20.0 / 1e6):.2f}")
+                 f"pos {amplitude * math.sin(2 * math.pi * freq * n * 20.0 / 1e3):.2f}")
                 for n in range(int(duration * 1000.0 / 20.0))]
         cases.append(Experiment(f"sin_{freq:g}", "position", duration, plan,
                                 {"pos": amplitude, "freq_hz": freq}, "sine position"))
@@ -231,9 +231,10 @@ def run_case(link, out_dir, experiment, group, limits, repetitions=1):
         link.open_session()
         try:
             # Deterministic pre-roll: identical starting state every repeat.
-            bench.wait_idle(link)
             link.send("send 3")
             link.listen(0.15)  # let the group change land
+            if not bench.wait_idle(link):
+                raise RuntimeError("motor did not become idle before the next case")
             if experiment.mode == "position":
                 link.send("zero")  # the origin is the only stateful input
                 link.listen(0.1)
@@ -273,6 +274,7 @@ def run_case(link, out_dir, experiment, group, limits, repetitions=1):
         bench.archive(path, target, meta)
         # Continuity is measured from the archive so a torn capture is caught now.
         table, loaded = bench.load(target)
+        os.unlink(path)
         loaded["continuity"]["path"] = target
         results.append(loaded)
         flags = loaded["continuity"]
@@ -404,34 +406,30 @@ def command_report(args):
 
 
 def command_chain(args):
-    """Join one case's four groups on the sample counter into a wide table."""
+    """Place independent repeats beside each other by capture-relative sample."""
     files = sorted(f for f in os.listdir(args.directory)
                    if f.startswith(args.case) and f.endswith(".zip"))
     if len(files) < 2:
         raise SystemExit(f"need the same case on several groups, found {files}")
-    merged = None
-    columns = []
+    blocks = []
+    columns = ["capture_s"]
+    seen = set()
     for name in files:
         table, meta = bench.load(os.path.join(args.directory, name))
         words = np.frombuffer(table[:, :12].tobytes(), dtype="<u4").reshape(-1, 12)
         seq = (words[:, 1] & 0xFFFFFF).astype(np.int64)
         group = int(words[0, 1] >> 24)
-        names = [f"g{group}_{c}" for c in bench.GROUP_CHANNELS[group]]
-        block = table[:, 2:12].astype(np.float64)
-        if merged is None:
-            merged = {"seq": seq, "t_us": (words[:, 0] & 0xFFFFFF).astype(np.int64)}
-            columns = ["seq", "t_us"]
-        else:
-            if not np.array_equal(seq, merged["seq"]):
-                raise SystemExit(f"{name}: sample counters do not line up with the first group")
-        for index, label in enumerate(names):
-            merged[label] = block[:, index]
-            columns.append(label)
-    matrix = np.column_stack([merged[c] for c in columns])
+        if group in seen or meta["continuity"]["gaps"]:
+            raise SystemExit(f"{name}: duplicate group or discontinuous capture")
+        seen.add(group)
+        blocks.append(np.column_stack((seq, table[:, 2:12])).astype(np.float64))
+        columns += [f"g{group}_seq"] + [f"g{group}_{c}" for c in bench.GROUP_CHANNELS[group]]
+    length = min(len(block) for block in blocks)
+    matrix = np.column_stack([np.arange(length) / bench.SAMPLE_HZ] + [block[:length] for block in blocks])
     stem = os.path.join(args.directory, f"{args.case}_merged")
     np.savetxt(stem + ".csv", matrix, delimiter=",", header=",".join(columns),
                comments="", fmt="%.6g")
-    print(f"wrote {stem}.csv  ({matrix.shape[0]} rows x {matrix.shape[1]} columns)")
+    print(f"wrote {stem}.csv  ({matrix.shape[0]} rows x {matrix.shape[1]} columns); independent runs aligned by capture start only")
     return 0
 
 

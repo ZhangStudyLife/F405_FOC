@@ -24,7 +24,7 @@ download\bench.cmd chain  %TEMP%\foc_bench\<时间戳> step_pos_360
 | 文件 | 内容 |
 |---|---|
 | `meta.json` | 工况名、模式、组号、目标值、命令时间线、抖动、限制、git 版本、列名 |
-| `frames.f32` | 原始帧流，**每帧 12 个小端 float32 = 48 字节，无帧尾**（帧尾在归档前已校验并剥离） |
+| `frames.f32` | 原始帧流，**每帧 12 个小端 float32 + 4 字节帧尾 = 52 字节** |
 
 `frames.f32` 可直接用 numpy 读：
 
@@ -32,7 +32,7 @@ download\bench.cmd chain  %TEMP%\foc_bench\<时间戳> step_pos_360
 import numpy as np, json, zipfile
 with zipfile.ZipFile("step_pos_360_g3_r0.zip") as z:
     meta = json.loads(z.read("meta.json"))
-    data = np.frombuffer(z.read("frames.f32"), dtype="<f4").reshape(-1, 12)
+    data = np.frombuffer(z.read("frames.f32"), dtype="<f4").reshape(-1, 13)[:, :12]
 ```
 
 或让库代劳（解压到临时目录并给出连续性统计）：
@@ -46,22 +46,22 @@ print(meta["continuity"])
 
 ## 高速帧格式（USB 20 kHz）
 
-`send X` 之后每个 20 kHz 采样发一帧：**12 个小端 float32 + 帧尾 `00 00 80 7F` = 52 字节**。
+`send X` 之后每个 20 kHz 采样发一帧：**12 个小端 float32 + 帧尾 `00 00 80 7F` = 52 字节，即 1,040,000 B/s**。
 
 | 下标 | 内容 |
 |---|---|
-| 0 | 低 24 位 = `t_u24`（TIM5 微秒，16.78 s 回绕）；高 8 位 = 状态字：bit0..2 状态、bit3..6 故障、bit7..8 功率模式 |
+| 0 | 低 24 位 = `t_u24`（TIM5 微秒，16.78 s 回绕）；高 8 位 = 状态字：bit0..2 状态、bit3..6 故障、bit7 为 PWM 已开启 |
 | 1 | 低 24 位 = `seq`（20 kHz 单调计数，13.98 min 回绕）；高 8 位 = 日志组号 |
 | 2..11 | 该组的 10 个数据通道（见下表） |
 
 **时间与丢帧**：`t_u24` 与 `seq` 是权威采样身份，与组号无关；组号切换不重置它们。
-相邻帧应满足 `t_u24` 差 50 µs、`seq` 差 1。若某帧丢失，`seq` 差 2、`t_u24`
-差 100 µs，按 `t_u24` 即可重建严格 20 kHz 网格。`benchlib.continuity()` 给出
-`gaps`（不等 50 µs 的间隔数）、`max_gap_us`、`missing`（推算丢失帧数）与 `seq_ok`。
+相邻帧应满足 `seq` 差 1，ISR 时间戳一般差 50 µs，允许 45..55 µs 入口抖动。若某帧丢失，`seq` 差 2、`t_u24`
+约差 100 µs；按 `seq` 可重建严格 20 kHz 网格。`benchlib.continuity()` 给出
+`gaps`（序号不连续或时间差超出 45..55 µs 的间隔数）、`timestamp_jitter`、`max_gap_us`、`missing`（序号推算丢失帧数）与 `seq_ok`。
 
 状态字：状态 `0..6` = IDLE/PRECHARGE/CALIBRATE/SAVE/RUN/FAULT/OFFSET；
 故障 `0..12` = OK/SENSOR/ADC/TIMING/WINDOW/ALIGNMENT/FLASH/UART/BUS/ZERO/CURRENT/SPEED/POSITION；
-功率模式 `0..2` = OFF/PRECHARGE/PWM。
+bit7=1 表示 PWM 已开启；OFF/PRECHARGE 由状态区分。
 
 ### 四组通道（先发无法离线反算的量）
 
@@ -74,7 +74,7 @@ print(meta["continuity"])
 | 6 | `v_c` V | `integral_d` V | `ccr_c` | `rpm` |
 | 7 | `v_bus` V | `integral_q` V | `duty_a` | `rpm_encoder` |
 | 8 | `angle_raw_deg` ° | `ud` V | `duty_b` | `rpm_tgt` |
-| 9 | `sample_us` | `uq` V | `duty_c` | `iq_outer` A |
+| 9 | `sample_us` | `uq` V | `duty_c` | `iq` A |
 | 10 | `bus_v_nominal` V | `b_offset` V | `edge_limit_v` V | `mode` |
 | 11 | `b_offset` V | `c_offset` V | `vec_limit_v` V | `bus_v` V |
 
@@ -90,8 +90,9 @@ print(meta["continuity"])
 - **组 3**：`pos_deg`/`rpm` 是编码器 Ground Truth，进入无感 FOC 后仍然采集，
   用于与估计角度/速度对比。`mode`：0=Torque、1=Speed、2=Position。
 
-同一工况在 4 个组上分别跑，`chain` 会按 `seq` 把四份数据对齐并导出宽表 CSV——
-因为 12 float 的带宽装不下全部物理量，重复跑 + 离线拼接才是完整数据集。
+同一工况在 4 个组上分别跑，`chain` 按每段采集开始后的样本序号并列导出宽表 CSV。
+各次运行的全局 `seq` 不相同，这种并列仅供重复性比较，**不能视作同一物理瞬间**；
+目前组 0 的电流与组 2 的 PWM 不同时采集，尚不能做严格的逐样本无感 FOC 回放。
 
 ## 命令
 
