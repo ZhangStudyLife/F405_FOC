@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
@@ -166,16 +166,18 @@ MODE_ZH = {"torque": "力矩", "speed": "速度", "position": "位置"}
 
 # ------------------------------------------------------------------ execution
 
-def wait_speed(link, monitor, target, timeout=8.0):
+def wait_speed(link, monitor, target, timeout=8.0, supply=None):
     link.send(f"rpm {target:.2f}")
     deadline = time.monotonic() + timeout
     stable = None
     while time.monotonic() < deadline:
+        if supply:
+            supply.health()
+        frames = link.listen(.02)  # Drain the active 20 kHz stream during spin-up too.
         if monitor:
             sample = monitor.health()
             actual = sample["rpm"]
         else:
-            frames = link.listen(.05)
             if not frames:
                 continue
             frame = frames[-1]
@@ -190,7 +192,6 @@ def wait_speed(link, monitor, target, timeout=8.0):
                 return
         else:
             stable = None
-        time.sleep(.02)
     raise RuntimeError(f"预转速未达到 {target:g} rpm，动态辨识已跳过")
 
 
@@ -278,7 +279,7 @@ def run_case(link, out_dir, experiment, group, limits, monitor, supply=None,
         for command in experiment.setup:
             link.send(command)
         if experiment.initial_rpm:
-            wait_speed(link, monitor, experiment.initial_rpm)
+            wait_speed(link, monitor, experiment.initial_rpm, supply=supply)
         link.send(f"send {group}")
         link.drain(.15)
         if monitor:
@@ -301,6 +302,11 @@ def run_case(link, out_dir, experiment, group, limits, monitor, supply=None,
         time.sleep(.2)
     except Exception as exc:
         error = str(exc)
+        with open(os.path.join(stage, "failure.json"), "w", encoding="utf-8") as handle:
+            json.dump({"host_ns": time.monotonic_ns(), "error": error,
+                       "uart": monitor.latest if monitor else None,
+                       "power": asdict(supply.state) if supply else None},
+                      handle, ensure_ascii=False, indent=2)
     finally:
         try:
             if monitor:
@@ -308,6 +314,11 @@ def run_case(link, out_dir, experiment, group, limits, monitor, supply=None,
             link.send("stop")
         except (OSError, RuntimeError):
             pass
+        if error and supply:
+            try:
+                supply.output(False)
+            except (OSError, RuntimeError) as exc:
+                error += f"；停机电源读回失败：{exc}"
         if capturing:
             link.stop_capture()
         if monitor:
@@ -417,16 +428,16 @@ def select_supply(args):
             if power is not chosen:
                 power.close()
         return chosen
-    return None
+    raise RuntimeError("学生电源候选均无法通信，禁止启动电机")
 
 
-def preflight(link, monitor):
+def preflight(link, monitor, supply=None):
     link.open_session()
     try:
         link.send("send 3")
         link.listen(.15)
         bench.wait_idle(link)
-        wait_speed(link, monitor, 250.0, timeout=8.0)
+        wait_speed(link, monitor, 250.0, timeout=8.0, supply=supply)
         return True
     finally:
         if monitor:
@@ -447,37 +458,71 @@ def recover(link, monitor, supply, args, voltage, error):
     except Exception:
         pass
     if supply:
-        supply.output(False)
+        try:
+            supply.output(False)
+        except (OSError, RuntimeError):
+            port, commands = supply.port.port, supply.commands
+            supply.close()
+            supply.__init__(port)
+            supply.commands = commands
+            supply.output(False)
         if supply.state.protection_status:
             raise RuntimeError(f"电源保护未消失：{supply.state.protection_status}")
-    force_reset = any(word in str(error) for word in ("保护", "故障", "转速", "电源"))
-    if not force_reset:
-        try:
-            link.close_session()
-            link.open_session()
-            link.send("send 3")
-            if link.listen(.6):
-                link.close_session()
-                if supply:
-                    supply.configure(voltage, 5.0)
-                    supply.output(True)
-                return link
-        except Exception:
-            pass
-    link.close()
-    reset_board(args)
-    port = bench.find_port(args.sn)
-    fresh = bench.Link(port.device, port.serial_number)
-    fresh.open_session()
-    fresh.send("send 3")
-    if not fresh.listen(.6):
-        fresh.close()
-        raise RuntimeError("ST-Link 复位后 USB 仍无帧")
-    fresh.close_session()
-    if supply:
-        supply.configure(voltage, 5.0)
-        supply.output(True)
-    return fresh
+    # Reconnect the port too: a dead OS handle cannot be repaired with DTR.
+    if link:
+        link.close()
+    fresh = None
+    try:
+        for reset in (False, True):
+            if reset:
+                if not supply:
+                    raise RuntimeError("不能核实功率断电，禁止自动 ST-Link 复位")
+                reset_board(args)
+            try:
+                port = bench.find_port(args.sn)
+                fresh = bench.Link(port.device, port.serial_number)
+                fresh.open_session()
+                fresh.send("stop")
+                fresh.send("send 3")
+                frames = fresh.listen(.6)
+                if not frames or frames[-1].group != 3:
+                    raise RuntimeError("重连后没有组 3 状态")
+                fresh.close_session()
+                break
+            except (OSError, RuntimeError):
+                if fresh:
+                    fresh.close()
+                    fresh = None
+                if reset:
+                    raise
+        if supply:
+            supply.configure(voltage, 5.0)
+            supply.output(True)
+            time.sleep(.5)
+            supply.health()
+        # Clear requires a valid bus. Clearing while the supply is off is rejected.
+        fresh.open_session()
+        frames = fresh.listen(.2)
+        if not frames:
+            raise RuntimeError("恢复母线后 USB 无反馈")
+        if frames[-1].fault:
+            print(f"恢复检查：{bench.FAULT_NAMES[frames[-1].fault]}，尝试一次 clear")
+            fresh.send("clear")
+        bench.wait_idle(fresh, threshold=5.0)
+        fresh.close_session()
+        if monitor:
+            if not monitor.running:
+                port = monitor.port.port
+                monitor.close()
+                monitor.__init__(port)
+                time.sleep(.2)
+            monitor.health()
+        print("恢复自检通过：有新帧、无故障、转子静止；重跑当前段")
+        return fresh
+    except Exception:
+        if fresh:
+            fresh.close()
+        raise
 
 
 def command_run(args):
@@ -508,8 +553,8 @@ def command_run(args):
                 work.append((voltage, experiment))
     if not work:
         raise RuntimeError("没有匹配的工况；先用 run --all --dry-run 查看名称")
-    if args.all and args.uart and args.uart.lower() in ("off", "none") and not args.dry_run:
-        raise RuntimeError("全量测试需要 CH340 在线监测；当前 USB 与 CH340 并发断流，须先修复链路")
+    if args.uart and args.uart.lower() in ("off", "none") and not args.dry_run:
+        raise RuntimeError("电机工况需要 CH340 在线监测；off 不能用于电机运行")
     total = sum(case.duration_s + (5 if case.initial_rpm else 1.5) for _, case in work) * len(groups) * args.repeat
     print(f"{len(work)} 个工况 × {len(groups)} 组 × {args.repeat} 次，预计约 {total/60:.1f} 分钟")
     if args.dry_run:
@@ -536,13 +581,19 @@ def command_run(args):
     failed = False
     try:
         supply = select_supply(args)
+        if supply:
+            session["power_commands"] = supply.commands
+            session["power_initial"] = asdict(supply.state)
         if not supply and len(voltages) > 1:
             raise RuntimeError("多母线全量测试需要指定并连接学生电源")
         if not args.uart or args.uart.lower() not in ("off", "none"):
             monitor = devices.UartMonitor(args.uart)
-        port = bench.find_port(args.sn)
-        link = bench.Link(port.device, port.serial_number)
-        print(f"FOC {port.device}，CH340 {monitor.port.port if monitor else '关闭'}，电源 {supply.port.port if supply else '未连接'}")
+        try:
+            port = bench.find_port(args.sn)
+            link = bench.Link(port.device, port.serial_number)
+        except (OSError, RuntimeError) as exc:
+            link = recover(None, monitor, supply, args, voltages[0], exc)
+        print(f"FOC {link.port.port}，CH340 {monitor.port.port if monitor else '关闭'}，电源 {supply.port.port if supply else '未连接'}")
         current_voltage = None
         rotation_ok = None
         for voltage, experiment in work:
@@ -558,10 +609,17 @@ def command_run(args):
             if experiment.mode != "torque" or experiment.initial_rpm:
                 if rotation_ok is None:
                     try:
-                        rotation_ok = preflight(link, monitor)
+                        rotation_ok = preflight(link, monitor, supply)
                     except Exception as exc:
-                        rotation_ok = False
-                        print(f"起转自检失败：{exc}；本电压下动态、速度与位置工况跳过")
+                        session["results"].append({"voltage": voltage, "case": "preflight",
+                            "status": "故障", "error": str(exc)})
+                        save()
+                        if "预转速未达到" in str(exc):
+                            rotation_ok = False
+                            print(f"起转自检失败：{exc}；本电压下动态、速度与位置工况跳过")
+                        else:
+                            link = recover(link, monitor, supply, args, voltage, exc)
+                            rotation_ok = preflight(link, monitor, supply)
                 if not rotation_ok:
                     session["results"].append({"voltage": voltage, "case": experiment.case,
                                                "status": "未执行", "reason": "起转自检失败"})
@@ -579,16 +637,19 @@ def command_run(args):
                         except Exception as exc:
                             session["results"].append({"voltage": voltage, "case": experiment.case,
                                 "group": group, "repeat": repeat, "status": "故障", "error": str(exc),
-                                "attempt": attempt})
+                                "attempt": attempt, "host_ns": time.monotonic_ns(),
+                                "uart": dict(monitor.latest) if monitor and monitor.latest else None,
+                                "power": asdict(supply.state) if supply else None})
                             save()
                             if attempt:
                                 raise RuntimeError("本段重试仍失败，已保存残段并停止测试") from exc
                             link = recover(link, monitor, supply, args, voltage, exc)
                     save()
-    except RuntimeError as exc:
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
         failed = True
         print(f"测试中止：{exc}")
     except KeyboardInterrupt:
+        failed = True
         print("用户中止，正在停机")
     finally:
         if monitor:
@@ -744,8 +805,9 @@ def command_list(args):
 
 def custom_case(mode, shape):
     command = {"torque": "Iq", "speed": "rpm", "position": "pos"}[mode]
-    value = float(input(f"{MODE_ZH[mode]}目标幅值（A/rpm/度，支持负数）："))
-    seconds = float(input("持续时间（秒）："))
+    default = {"torque": .5, "speed": 1000, "position": 360}[mode]
+    value = float(input(f"{MODE_ZH[mode]}目标幅值（A/rpm/度）[{default}]：") or default)
+    seconds = float(input("持续时间（秒）[6]：") or "6")
     if seconds <= 0:
         raise ValueError("持续时间必须大于 0")
     frequency = float(input("频率 Hz [直接回车为 0.5]：") or ".5") if shape in ("正弦", "方波") else .5
@@ -806,14 +868,19 @@ def menu(args):
             elif kind != "1":
                 print("无效选项")
                 continue
-            args.buses = input("母线电压，逗号分隔 [回车为 24]：").strip() or "24"
-            args.groups = input("日志组 [回车为 0,1,2,3]：").strip() or "0,1,2,3"
-            args.repeat = int(input("重复次数 [回车为 1]：") or "1")
-            command_run(args)
+            args.buses, args.groups, args.repeat = "24", "0,1,2,3", 1
+            print("使用默认方案：24 V、四组日志、每组一次；综合预设自动覆盖该模式全部档位。")
+            try:
+                command_run(args)
+            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                print(f"台架错误：{exc}")
         elif choice == "4":
             args.all, args.mode, args.case, args.custom_experiment = True, None, None, None
             args.buses = "24,18,12"
-            command_run(args)
+            try:
+                command_run(args)
+            except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                print(f"台架错误：{exc}")
         elif choice == "5":
             command_list(args)
             print("学生电源候选：" + ", ".join(devices.ports({(0x2E3C, 0x5740)})))
@@ -852,7 +919,7 @@ def main():
     run.add_argument("--out", default=bench.DATA_ROOT)
     run.add_argument("--sn")
     run.add_argument("--stlink-sn")
-    run.add_argument("--uart", help="CH340 串口；USB 高速全量测试可填 off 关闭并发串口")
+    run.add_argument("--uart", help="CH340 监测串口，电机工况必须在线")
     run.add_argument("--psu", help="学生电源串口；off 表示不连接")
     run.add_argument("--include-long", action="store_true", help="加入 60 圈位置专项")
     run.add_argument("--load-name", default="空载")
@@ -879,7 +946,11 @@ def main():
             pos_limit=DEFAULT_POS_LIMIT, out=bench.DATA_ROOT, sn=None, stlink_sn=None,
             uart=None, psu=None, include_long=False, dry_run=False, yes=False,
             load_name="空载", load_mass_g=None, load_stl=None, load_axis=None))
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        print(f"台架错误：{exc}")
+        return 1
 
 
 if __name__ == "__main__":

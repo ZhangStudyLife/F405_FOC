@@ -405,7 +405,7 @@ def archive(source, target, meta, verify=True):
         names = ["frames.f32", "meta.json"]
         with open(os.path.join(stage, "meta.json"), "w", encoding="utf-8") as handle:
             json.dump(meta, handle, ensure_ascii=False, indent=2)
-        names += [name for name in ("power.jsonl", "uart.jsonl") if os.path.exists(os.path.join(stage, name))]
+        names += [name for name in ("power.jsonl", "uart.jsonl", "failure.json") if os.path.exists(os.path.join(stage, name))]
         subprocess.run([SEVEN_ZIP, "a", "-t7z", "-m0=lzma2", "-mx=9", "-y", target, *names],
                        cwd=stage, check=True, stdout=subprocess.DEVNULL)
         if verify:

@@ -103,6 +103,7 @@ class StudentPower:
         self.log = None
         self.last_rx = 0.0
         self.last_full_ns = 0
+        self.commands = []
         self.running = True
         self.thread = threading.Thread(target=self._read, daemon=True)
         self.thread.start()
@@ -174,16 +175,20 @@ class StudentPower:
                    abs(self.state.set_current - amps) < .05, 2.0)
 
     def output(self, enabled):
+        self.commands.append({"host_ns": time.monotonic_ns(), "output": enabled})
+        print(f"脚本设置电源输出：{'开' if enabled else '关'}")
         before = self.last_full_ns
         self.send(WRITE, 0xDB, bytes((int(enabled),)))
         self.poll()
         self._wait(lambda: self.last_full_ns > before and self.state.output_enabled == enabled, 2.0)
 
-    def health(self):
-        if not self.running or time.monotonic() - self.last_rx > 2.0:
+    def health(self, require_output=True):
+        if not self.running or time.monotonic_ns() - self.last_full_ns > 2_000_000_000:
             raise RuntimeError("学生电源通信中断")
         if self.state.protection_status:
-            raise RuntimeError(f"学生电源保护 {self.state.protection_status}")
+            raise RuntimeError(f"学生电源保护 {self.state.protection_status}；输入 {self.state.input_voltage:.2f} V，输出 {self.state.output_voltage:.2f} V")
+        if require_output and not self.state.output_enabled:
+            raise RuntimeError("学生电源输出意外关闭（非本段脚本关断）")
 
     def start_log(self, path):
         with self.lock:
