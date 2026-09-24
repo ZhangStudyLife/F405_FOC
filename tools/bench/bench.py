@@ -720,7 +720,8 @@ def command_report(args):
             current = iq[5:-5]
             ok = (np.isfinite(omega) & np.isfinite(domega) & np.isfinite(current) &
                   (np.abs(omega) > 25 * math.pi / 30) & (np.abs(omega) < 7000 * math.pi / 30))
-            bus = float(meta.get("bus_set_v", np.nanmedian(table[::100, 11])))
+            bus = float(meta.get("bus_set_v", np.nanmedian(table[::100, 11])
+                        if table.shape[1] > 11 else np.nan))
             mechanics.setdefault(bus, []).append((current[ok], omega[ok], domega[ok]))
         print(f"{name}: {stats['frames']} frames, {stats['seconds']} s")
     lines += ["## 连续性", "",
