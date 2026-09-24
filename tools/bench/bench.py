@@ -643,11 +643,9 @@ def command_run(args):
                                 "power": asdict(supply.state) if supply else None})
                             save()
                             if attempt:
-                                if "USB 采集" in str(exc):
-                                    failed = True
-                                    print("本段 USB 重试仍失败，已保存残段；跳过本段继续后续工况")
-                                    break
-                                raise RuntimeError("本段重试仍失败，已保存残段并停止测试") from exc
+                                failed = True
+                                print(f"本段重试仍失败，已保存残段（{exc}）；跳过本段继续后续工况")
+                                break
                             link = recover(link, monitor, supply, args, voltage, exc)
                     save()
     except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
