@@ -57,15 +57,18 @@ def capture(port, seconds, group):
                 for start in range(max(0, len(pending) - 4096), len(pending) - FRAME_BYTES + 1):
                     if pending[start + CHANNELS * 4:start + FRAME_BYTES] != TERMINATOR:
                         continue
-                    index = header.unpack_from(pending, start + 4)[1]
-                    if index >> 24 == group:
+                    words = header.unpack_from(pending, start)
+                    status = words[0] >> 24
+                    index = words[1]
+                    if (index >> 24 == group and status & 0x78 == 0 and
+                            (status & 7) <= 6):
                         found = start
                         break
                 if found is None:
                     if len(pending) > 8192:
                         del pending[:-FRAME_BYTES]
                     continue
-                del pending[:found + FRAME_BYTES]
+                del pending[:found]
                 synced = True
             used = 0
             while len(pending) - used >= FRAME_BYTES:
