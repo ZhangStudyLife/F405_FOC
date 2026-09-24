@@ -198,10 +198,11 @@ def wait_speed(link, monitor, target, timeout=8.0, supply=None):
 def assess(table, meta):
     if meta["group"] != 3 or meta["mode"] == "torque":
         return "已采集"
-    target_column = 8 if meta["mode"] == "speed" else 5
-    actual_column = 6 if meta["mode"] == "speed" else 4
-    target = table[:, target_column]
-    actual = table[:, actual_column]
+    index = {name: position for position, name in enumerate(meta["columns"])}
+    target_name = "rpm_tgt" if meta["mode"] == "speed" else "pos_tgt"
+    actual_name = "rpm" if meta["mode"] == "speed" else "pos_deg"
+    target = table[:, index[f"g3_{target_name}"]] if f"g3_{target_name}" in index else np.zeros(len(table))
+    actual = table[:, index[f"g3_{actual_name}"]]
     if len(table) < 10000:
         return "数据不足"
     failures = 0
@@ -535,7 +536,7 @@ def command_run(args):
     voltages = (24.0, 18.0, 12.0) if args.all else tuple(float(v) for v in args.buses.split(","))
     limits = (args.iq_limit, args.rpm_limit, args.pos_limit)
     groups = [int(g) for g in args.groups.split(",")]
-    if any(g not in range(4) for g in groups) or args.repeat < 1:
+    if any(g not in range(8) for g in groups) or args.repeat < 1:
         raise RuntimeError("日志组只能为 0–3，重复次数至少为 1")
     work = []
     for voltage in voltages:
@@ -714,7 +715,7 @@ def command_report(args):
             # Decimate to 200 Hz, smooth encoder speed, and differentiate over
             # 50 ms. Static breakaway samples must never enter this fit.
             rpm = table[::100, 6].astype(float)
-            iq = table[::100, 9].astype(float)
+            iq = table[::100, 7].astype(float)
             smooth = np.convolve(rpm, np.ones(9) / 9, mode="same")
             omega = smooth[5:-5] * (math.pi / 30)
             domega = (smooth[10:] - smooth[:-10]) * (math.pi / 30) / .05
@@ -872,8 +873,8 @@ def menu(args):
             elif kind != "1":
                 print("无效选项")
                 continue
-            args.buses, args.groups, args.repeat = "24", "0,1,2,3", 1
-            print("使用默认方案：24 V、四组日志、每组一次；综合预设自动覆盖该模式全部档位。")
+            args.buses, args.groups, args.repeat = "24", "0,1,2,3,4,5,6,7", 1
+            print("使用默认方案：24 V、八组日志、每组一次；综合预设自动覆盖该模式全部档位。")
             try:
                 command_run(args)
             except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
@@ -915,7 +916,7 @@ def main():
     run.add_argument("--all", action="store_true", help="显式运行全量工况")
     run.add_argument("--case", help="仅运行指定工况名")
     run.add_argument("--buses", default="24", help="母线电压，如 24,18,12")
-    run.add_argument("--groups", default="0,1,2,3")
+    run.add_argument("--groups", default="0,1,2,3,4,5,6,7")
     run.add_argument("--repeat", type=int, default=1)
     run.add_argument("--iq-limit", type=float, default=DEFAULT_IQ_LIMIT, dest="iq_limit")
     run.add_argument("--rpm-limit", type=float, default=DEFAULT_RPM_LIMIT, dest="rpm_limit")
@@ -945,7 +946,7 @@ def main():
 
     args = parser.parse_args()
     if args.command is None:
-        return menu(argparse.Namespace(all=False, mode=None, case=None, buses="24", groups="0,1,2,3",
+        return menu(argparse.Namespace(all=False, mode=None, case=None, buses="24", groups="0,1,2,3,4,5,6,7",
             repeat=1, iq_limit=DEFAULT_IQ_LIMIT, rpm_limit=DEFAULT_RPM_LIMIT,
             pos_limit=DEFAULT_POS_LIMIT, out=bench.DATA_ROOT, sn=None, stlink_sn=None,
             uart=None, psu=None, include_long=False, dry_run=False, yes=False,

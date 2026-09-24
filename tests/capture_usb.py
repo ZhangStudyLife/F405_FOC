@@ -1,6 +1,6 @@
 """Validate one 20 kHz logging group of the 405_FOC USB stream.
 
-Frame: 12 little-endian float32 + the JustFloat terminator = 52 bytes.
+Frame: 8 little-endian float32 + the JustFloat terminator = 36 bytes.
 Channel 0 packs t_u24 with the status word, channel 1 packs the sample counter
 with the group number; see tools/bench/README.md for the group channel maps.
 
@@ -12,11 +12,11 @@ import time
 
 import serial
 
-FRAME_BYTES = 52
-CHANNELS = 12
+FRAME_BYTES = 36
+CHANNELS = 8
 TERMINATOR = b"\x00\x00\x80\x7f"
 T_24_MASK = 0xFFFFFF
-GROUP_NAMES = {0: "raw", 1: "current", 2: "voltage", 3: "control"}
+GROUP_NAMES = {i: name for i, name in enumerate(("raw0", "raw1", "current", "control", "voltage", "voltage2", "current2", "control2"))}
 
 
 def capture(port, seconds, group):
@@ -51,14 +51,22 @@ def capture(port, seconds, group):
             last_data = now
             pending.extend(data)
             if not synced:
-                # Opening an existing CDC session can expose an initial partial frame.
-                pos = pending.find(TERMINATOR)
-                if pos < 0:
-                    if len(pending) > 4096:
-                        raise RuntimeError("No JustFloat boundary found")
+                # Discard complete frames from the previous DTR session until the
+                # requested group appears; do not mistake stale bytes for a test frame.
+                while True:
+                    pos = pending.find(TERMINATOR)
+                    if pos < CHANNELS * 4:
+                        if len(pending) > 4096:
+                            del pending[:-FRAME_BYTES]
+                        break
+                    start = pos - CHANNELS * 4
+                    index = header.unpack_from(pending, start + 4)[1]
+                    del pending[:pos + len(TERMINATOR)]
+                    if index >> 24 == group:
+                        synced = True
+                        break
+                if not synced:
                     continue
-                del pending[:pos + len(TERMINATOR)]
-                synced = True
             used = 0
             while len(pending) - used >= FRAME_BYTES:
                 if bytes(pending[used + CHANNELS * 4:used + FRAME_BYTES]) != TERMINATOR:

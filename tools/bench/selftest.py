@@ -13,17 +13,17 @@ import benchlib as bench  # noqa: E402
 
 def encode(t_us, seq, group, payload):
     """Build one wire frame exactly as App/Control/app.c does."""
-    assert len(payload) == 10
+    assert len(payload) == 6
     word0 = (t_us & 0xFFFFFF) | ((4 << 0) << 24)  # RUN state, no fault, gates on
     word1 = (seq & 0xFFFFFF) | (group << 24)
     floats = [struct.unpack("<f", struct.pack("<I", word0))[0],
               struct.unpack("<f", struct.pack("<I", word1))[0]] + list(payload)
-    return struct.pack("<12f", *floats) + bench.TERMINATOR
+    return struct.pack("<8f", *floats) + bench.TERMINATOR
 
 
 def main():
     # 1. Byte-exact round trip of one frame through the parser.
-    frame = encode(1234, 99, 2, [float(n) for n in range(10)])
+    frame = encode(1234, 99, 2, [float(n) for n in range(6)])
     assert len(frame) == bench.FRAME_BYTES, len(frame)
     reader = bench.FrameReader()
     frames = reader.feed(frame)
@@ -31,7 +31,7 @@ def main():
     parsed = frames[0]
     assert parsed.time_us == 1234 and parsed.seq == 99 and parsed.group == 2
     assert parsed.state == 4 and parsed.fault == 0
-    assert [parsed.channel(2 + n) for n in range(10)] == [float(n) for n in range(10)]
+    assert [parsed.channel(2 + n) for n in range(6)] == [float(n) for n in range(6)]
 
     # 2. Split and coalesced reads must give the same frames.
     reader = bench.FrameReader()
@@ -53,7 +53,7 @@ def main():
     seconds = 0.1
     count = int(bench.SAMPLE_HZ * seconds)
     blob = b"".join(encode((n * 50) & 0xFFFFFF, n & 0xFFFFFF, 3,
-                           [float(n)] * 10) for n in range(count))
+                           [float(n)] * 6) for n in range(count))
     directory = tempfile.mkdtemp(prefix="foc_selftest_")
     path = os.path.join(directory, "run.f32")
     with open(path, "wb") as handle:
@@ -71,7 +71,7 @@ def main():
     with open(path, "wb") as handle:
         for n in range(count):
             if n != 200:
-                handle.write(encode((n * 50) & 0xFFFFFF, n & 0xFFFFFF, 3, [float(n)] * 10))
+                handle.write(encode((n * 50) & 0xFFFFFF, n & 0xFFFFFF, 3, [float(n)] * 6))
     table, _, words = bench.parse_file(path)
     assert table.shape[0] == count - 1
     flags = bench.continuity(words, 3)
@@ -85,9 +85,9 @@ def main():
     assert len(table) == count and dropped == bench.FRAME_BYTES
     assert bench.continuity(words, 3)["gaps"] == 0
     with open(path, "wb") as handle:
-        handle.write(blob[:200 * 52 + 48] + blob[201 * 52 + 8:])
+        handle.write(blob[:200 * bench.FRAME_BYTES + bench.FRAME_BYTES - 4] + blob[201 * bench.FRAME_BYTES + 8:])
     table, dropped, words = bench.parse_file(path)
-    assert len(table) == count - 2 and dropped == 92
+    assert len(table) == count - 2 and dropped == 60
     flags = bench.continuity(words, 3)
     assert flags["gaps"] == 1 and flags["missing"] == 2
 
@@ -104,7 +104,7 @@ def main():
     for group, names in GROUP_CHANNELS.items():
         assert len(names) == CHANNELS - 2, group
         assert len(COLUMNS[group]) == bench.CHANNEL_COUNT
-        assert COLUMNS[group][2:12] == [f"g{group}_{n}" for n in names]
+        assert COLUMNS[group][2:8] == [f"g{group}_{n}" for n in names]
     with open(path, "wb") as handle:
         handle.write(blob)
     meta = {"group": 3, "raw_bytes": len(blob), "frames": count, "case": "selftest"}

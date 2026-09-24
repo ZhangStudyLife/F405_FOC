@@ -12,7 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define FOC_FRAME_CHANNELS 12u /* 2 header words plus 10 payload channels. */
+#define FOC_FRAME_CHANNELS 8u /* 2 headers plus 6 payload channels; 36 B at 20 kHz. */
 /* FOC_EDGE_LIMIT / 4200 from foc.c: sample-window ceiling on the vector span. */
 #define FOC_EDGE_FRACTION 0.1211428571f
 
@@ -65,7 +65,7 @@ static uint32_t status_word(void)
     return foc.state | (foc.fault << 3) | ((uint32_t)(motor_mode == MOTOR_PWM) << 7);
 }
 
-/* 20 kHz USB logging: one group at a time, 12 float32 plus the JustFloat
+/* 20 kHz USB logging: one group at a time, 8 float32 plus the JustFloat
    terminator. Group 0 carries raw sensor truth, group 1 current-loop internals,
    group 2 the applied voltage, group 3 the reference and mechanical response.
    Channels that a host can reconstruct offline are deliberately absent. */
@@ -78,56 +78,53 @@ static void telemetry_usb(const float sampled_duty[3])
     payload[0] = time.f;
     payload[1] = index.f;
     switch (telemetry_group) {
-    default: /* Group 0: current, bus, encoder, and PWM of the sampled period. */
-        payload[2] = (float)adc_raw_b;
-        payload[3] = (float)adc_raw_c;
-        payload[4] = (float)adc_raw_bus;
-        payload[5] = mt6835_raw_deg;
+    case 0: /* raw ADC/angle and first sampled PWM value */
+        payload[2] = (float)adc_raw_b; payload[3] = (float)adc_raw_c;
+        payload[4] = (float)adc_raw_bus; payload[5] = mt6835_raw_deg;
         payload[6] = mt6835_angle_deg;
         payload[7] = (float)(uint32_t)(sampled_duty[0] * 4200.0f + 0.5f);
-        payload[8] = (float)(uint32_t)(sampled_duty[1] * 4200.0f + 0.5f);
-        payload[9] = (float)(uint32_t)(sampled_duty[2] * 4200.0f + 0.5f);
-        payload[10] = foc.b_offset;
-        payload[11] = foc.c_offset;
         break;
-    case 1: { /* Phase currents, electrical angle, PI state, pre-limit command. */
-        float integral_d, integral_q;
-        foc_integrators(&integral_d, &integral_q);
+    case 1: /* remaining sampled PWM and current offsets */
+        payload[2] = (float)(uint32_t)(sampled_duty[1] * 4200.0f + 0.5f);
+        payload[3] = (float)(uint32_t)(sampled_duty[2] * 4200.0f + 0.5f);
+        payload[4] = foc.b_offset; payload[5] = foc.c_offset;
+        payload[6] = adc_sample.b_voltage; payload[7] = adc_sample.c_voltage;
+        break;
+    case 2: { /* phase currents and electrical angle */
+        float integral_d, integral_q; foc_integrators(&integral_d, &integral_q);
         payload[2] = foc.zero_ready ? (adc_sample.b_voltage - foc.b_offset) * 50.0f : NAN;
         payload[3] = foc.zero_ready ? (adc_sample.c_voltage - foc.c_offset) * 50.0f : NAN;
-        payload[4] = foc.electrical_deg;
-        payload[5] = foc.iq_ref;
-        payload[6] = integral_d;
-        payload[7] = integral_q;
-        payload[8] = foc.ud;
-        payload[9] = foc.uq;
-        payload[10] = foc.b_offset;
-        payload[11] = foc.c_offset;
+        payload[4] = foc.electrical_deg; payload[5] = foc.iq_ref;
+        payload[6] = integral_d; payload[7] = integral_q;
         break;
     }
-    case 2: /* Applied voltage: the CCRs live for this period, and the limits. */
-        payload[2] = foc.ud;
-        payload[3] = foc.uq;
+    case 3: /* control/reference chain; kept as group 3 for existing tools */
+        payload[2] = foc.iq_ref; payload[3] = control_speed_target();
+        payload[4] = control_position_deg(); payload[5] = control_position_target();
+        payload[6] = control_speed_rpm(); payload[7] = foc.rpm;
+        break;
+    case 4: /* applied vector and CCR */
+        payload[2] = foc.ud; payload[3] = foc.uq;
         payload[4] = (float)(uint32_t)(foc.duty[0] * 4200.0f + 0.5f);
         payload[5] = (float)(uint32_t)(foc.duty[1] * 4200.0f + 0.5f);
         payload[6] = (float)(uint32_t)(foc.duty[2] * 4200.0f + 0.5f);
         payload[7] = motor_duty[0];
-        payload[8] = motor_duty[1];
-        payload[9] = motor_duty[2];
-        payload[10] = FOC_EDGE_FRACTION * adc_sample.bus_voltage;
-        payload[11] = 0.5773502692f * adc_sample.bus_voltage;
         break;
-    case 3: /* Reference chain and mechanical response. */
-        payload[2] = foc.iq_ref;
-        payload[3] = foc.command;
-        payload[4] = control_position_deg();
-        payload[5] = control_position_target();
-        payload[6] = control_speed_rpm();
-        payload[7] = foc.rpm;
-        payload[8] = control_speed_target();
-        payload[9] = foc.iq;
-        payload[10] = (float)control_mode();
-        payload[11] = adc_sample.bus_voltage;
+    case 5: /* remaining duty and voltage limits */
+        payload[2] = motor_duty[1]; payload[3] = motor_duty[2];
+        payload[4] = FOC_EDGE_FRACTION * adc_sample.bus_voltage;
+        payload[5] = 0.5773502692f * adc_sample.bus_voltage;
+        payload[6] = control_speed_target(); payload[7] = foc.iq;
+        break;
+    case 6: /* current-loop voltage and offsets */
+        payload[2] = foc.ud; payload[3] = foc.uq;
+        payload[4] = foc.b_offset; payload[5] = foc.c_offset;
+        payload[6] = foc.id; payload[7] = foc.iq;
+        break;
+    default: /* mode and bus complete the control record */
+        payload[2] = control_speed_target(); payload[3] = foc.iq;
+        payload[4] = (float)control_mode(); payload[5] = adc_sample.bus_voltage;
+        payload[6] = control_position_target(); payload[7] = control_position_deg();
         break;
     }
     s_usb_frame[FOC_FRAME_CHANNELS] = INFINITY;
@@ -262,7 +259,7 @@ bool app_command(const char *line)
             !parse_decimal(j, &jerk, 1000000.0f)) return false;
         command = MOTION;
     }
-    else if (!strncmp(line, "send ", 5u) && line[5] >= '0' && line[5] <= '3' && !line[6]) {
+    else if (!strncmp(line, "send ", 5u) && line[5] >= '0' && line[5] <= '7' && !line[6]) {
         telemetry_group = (uint8_t)(line[5] - '0');
         return true;
     } else return false;

@@ -1,8 +1,8 @@
 """Host side of the 405_FOC bench data system.
 
-One USB frame is 12 little-endian float32 plus the JustFloat terminator
-``00 00 80 7F``, 52 bytes total, sent at 20 kHz. Channels 0 and 1 are packed
-header words; the ten remaining channels depend on the logging group selected
+One USB frame is 8 little-endian float32 plus the JustFloat terminator
+``00 00 80 7F``, 36 bytes total, sent at 20 kHz. Channels 0 and 1 are packed
+header words; the six remaining channels depend on the logging group selected
 with ``send X``. See README.md for the per-group channel map.
 """
 import argparse
@@ -21,8 +21,8 @@ import numpy as np
 import serial
 from serial.tools import list_ports
 
-FRAME_BYTES = 52
-CHANNELS = 12
+FRAME_BYTES = 36
+CHANNELS = 8
 TERMINATOR = b"\x00\x00\x80\x7f"
 SAMPLE_HZ = 20000.0
 SAMPLE_US = 50
@@ -32,22 +32,23 @@ USB_VID_PID = (0x0483, 0x5740)
 DATA_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "data"))
 SEVEN_ZIP = shutil.which("7z") or r"C:\Program Files\7-Zip\7z.exe"
 
-# Channels 2..11 per logging group, exactly as App/Control/app.c fills them.
+# Channels 2..7 per logging group, exactly as App/Control/app.c fills them.
 GROUP_CHANNELS = {
-    0: ["adc_raw_b", "adc_raw_c", "adc_raw_bus", "angle_raw_deg", "angle_deg",
-        "sampled_ccr_a", "sampled_ccr_b", "sampled_ccr_c", "b_offset", "c_offset"],
-    1: ["ib", "ic", "elec_deg", "iq_ref", "integral_d", "integral_q",
-        "ud", "uq", "b_offset", "c_offset"],
-    2: ["ud", "uq", "ccr_a", "ccr_b", "ccr_c", "duty_a", "duty_b", "duty_c",
-        "edge_limit_v", "vec_limit_v"],
-    3: ["iq_ref", "iq_ref_cmd", "pos_deg", "pos_tgt", "rpm", "rpm_encoder",
-        "rpm_tgt", "iq", "mode", "bus_v"],
+    0: ["adc_raw_b", "adc_raw_c", "adc_raw_bus", "angle_raw_deg", "angle_deg", "sampled_ccr_a"],
+    1: ["sampled_ccr_b", "sampled_ccr_c", "b_offset", "c_offset", "b_voltage", "c_voltage"],
+    2: ["ib", "ic", "elec_deg", "iq_ref", "integral_d", "integral_q"],
+    3: ["iq_ref", "rpm_tgt", "pos_deg", "pos_tgt", "rpm", "rpm_encoder"],
+    4: ["ud", "uq", "ccr_a", "ccr_b", "ccr_c", "duty_a"],
+    5: ["duty_b", "duty_c", "edge_limit_v", "vec_limit_v", "rpm_tgt", "iq"],
+    6: ["ud", "uq", "b_offset", "c_offset", "id", "iq"],
+    7: ["rpm_tgt", "iq", "mode", "bus_v", "pos_tgt", "pos_deg"],
 }
-CHANNEL_COUNT = 2 + 26  # union of the channels any group can carry
+CHANNEL_COUNT = 8
+
 
 
 def _columns(group):
-    """Matrix column names: header, then this group's ten live channels."""
+    """Matrix column names: header, then this group's six live channels."""
     names = ["t_us", "seq"] + [f"g{group}_{n}" for n in GROUP_CHANNELS[group]]
     return names + [f"unused{n}" for n in range(len(names), CHANNEL_COUNT)]
 
@@ -86,7 +87,7 @@ class Frame:
         self.body = body
 
     def channel(self, index):
-        """Channel value by its index inside the 12-float frame."""
+        """Channel value by its index inside the 8-float frame."""
         return struct.unpack_from("<f", self.body, index * 4)[0]
 
     def __repr__(self):
@@ -461,6 +462,8 @@ def summarise(table, meta):
         return stats
     index = {name: position for position, name in enumerate(meta["columns"])}
     for name in ("rpm", "rpm_tgt", "pos_deg", "pos_tgt", "iq_ref", "iq"):
+        if f"g{group}_{name}" not in index:
+            continue
         values = table[:, index[f"g{group}_{name}"]].astype(np.float64)
         finite = values[np.isfinite(values)]
         stats[name] = ({

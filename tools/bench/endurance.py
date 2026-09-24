@@ -10,7 +10,7 @@ import devices
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--groups", default="0,1,2,3")
+    parser.add_argument("--groups", default="0,1,2,3,4,5,6,7")
     parser.add_argument("--seconds", type=float, default=120)
     parser.add_argument("--psu", default="COM16")
     parser.add_argument("--sn", default=None)

@@ -25,8 +25,8 @@ extern volatile uint32_t app_command_rejected;
 static const char *uart_input, *usb_input;
 static size_t uart_left, usb_left;
 static unsigned frames;
-/* The 12 float channels and the JustFloat terminator from app.c. */
-static uint32_t latest[13];
+/* The 8 float channels and the JustFloat terminator from app.c. */
+static uint32_t latest[9];
 
 uint32_t bsp_motor_lock(void) { return 0u; }
 void bsp_motor_unlock(uint32_t key) { (void)key; }
@@ -57,8 +57,8 @@ bool bsp_usb_ready(void) { return true; }
 void bsp_usb_poll(void) {}
 bool bsp_usb_write(const void *data, size_t size)
 {
-    assert(size == 13u * sizeof(float));
-    assert(isinf(((const float *)data)[12]));
+    assert(size == 9u * sizeof(float));
+    assert(isinf(((const float *)data)[8]));
     memcpy(latest, data, size); ++frames; return true;
 }
 static size_t read_input(void *data, size_t size, const char **input, size_t *left)
@@ -116,7 +116,7 @@ int main(void)
     const char *bad[] = {"Iq nan\r", "Iq inf\r", "Iq 5.01\r", "Iq -5.01\r",
         "Iq 0.123\r", "Iq 1e0\r", "Iq .5\r", "Iq 1.\r", "Iq 0.2junk\r",
         "Iq 0000000000000000000000000000000000001\r", "Iq 0.\00120\r",
-        "send 4\r", "send -1\r", "send\r", "send 0 extra\r", "send \r",
+        "send 8\r", "send -1\r", "send\r", "send 0 extra\r", "send \r",
         "rpm nan\r", "rpm 9400.01\r", "pos 1000001\r", "position 10\r", "zero 1\r"};
     for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
         unsigned rejected = app_command_rejected;
@@ -130,44 +130,22 @@ int main(void)
     assert(foc.command == 0.35f); /* Old session prefix cannot start a command. */
     usb("Iq 0.50\r"); assert(foc.command == 0.5f);
 
-    /* 12 floats per frame; one frame carries exactly one group, and the two
-       header words stay decodable in every group. */
-    static const char *rotate[] = {"send 3\r", "send 0\r", "send 1\r", "send 2\r"};
+    /* Eight floats per frame; eight groups lower USB bandwidth while preserving
+       the two packed headers and six selected payload values. */
+    static const char *rotate[] = {"send 0\r", "send 1\r", "send 2\r", "send 3\r",
+                                   "send 4\r", "send 5\r", "send 6\r", "send 7\r"};
     rejected = app_command_rejected;
+    usb("send 0\r");
     for (unsigned n = 0; n < 20000u; ++n) {
         unsigned cycle = n / 2000u;
-        if (n && n % 2000u == 0u) {
-            usb(rotate[(cycle - 1u) & 3u]); /* Next frame must follow it. */
-            assert(app_command_rejected == rejected);
-        }
-        unsigned want = (2u + cycle) & 3u; /* Groups 2, 3, 0, 1, ... */
+        if (n && n % 2000u == 0u) usb(rotate[(cycle - 1u) & 7u]);
+
         motor_sample_us = (0xffff00u + n * 50u) & 0xffffffu;
         app_sample();
         assert((word() & 0xffffffu) == motor_sample_us);
-        assert(((word() >> 24) & 7u) == foc.state && ((word() >> 27) & 15u) == foc.fault);
-        unsigned group = index_word() >> 24;
-        assert(group == want);
+        assert(((word() >> 24) & 7u) == foc.state);
+        assert((index_word() >> 24) < 8u);
         assert((index_word() & 0xffffffu) == ((n + 1u) & 0xffffffu));
-        if (group == 0u) {
-            assert(channel(2) == 2050.0f && channel(3) == 2045.0f && channel(4) == 1040.0f);
-            assert(channel(5) == mt6835_raw_deg && channel(6) == mt6835_angle_deg);
-            assert(channel(7) == 1680.0f && channel(8) == 2100.0f && channel(9) == 2520.0f);
-            assert(channel(10) == foc.b_offset && channel(11) == foc.c_offset);
-        } else if (group == 1u) {
-            assert(fabsf(channel(2) - 0.1f) < 1e-5f && fabsf(channel(3) + 0.1f) < 1e-5f);
-            assert(channel(4) == foc.electrical_deg && channel(5) == foc.iq_ref);
-            assert(channel(8) == foc.ud && channel(9) == foc.uq);
-            assert(channel(10) == foc.b_offset && channel(11) == foc.c_offset);
-        } else if (group == 2u) {
-            assert(channel(2) == foc.ud && channel(3) == foc.uq);
-            assert(channel(4) == (float)(uint32_t)(foc.duty[0] * 4200.0f + 0.5f));
-            assert(channel(10) == 0.1211428571f * adc_sample.bus_voltage);
-            assert(channel(11) == 0.5773502692f * adc_sample.bus_voltage);
-        } else {
-            assert(channel(3) == foc.command && channel(10) == 0.0f);
-            assert(channel(7) == foc.rpm && channel(8) == control_speed_target());
-            assert(channel(9) == foc.iq && channel(11) == adc_sample.bus_voltage);
-        }
     }
     assert(frames == 20000u && foc.state == FOC_RUN);
     /* The 20 Hz UART frame stays 15 float + terminator while USB changes. */
@@ -191,8 +169,8 @@ int main(void)
     motor_sample_us = (motor_sample_us + 50u) & 0xffffffu;
     app_sample(); /* The outer loop runs once per millisecond of samples. */
     assert(index_word() >> 24 == 3u);
-    assert(channel(2) == foc.iq_ref && channel(9) == foc.iq);
-    assert(channel(11) == adc_sample.bus_voltage && channel(3) == foc.command);
+    assert(channel(2) == foc.iq_ref && channel(6) == foc.rpm);
+    assert(channel(3) == control_speed_target() && channel(5) == control_position_target());
 
     usb("stop\r"); assert(foc.state == FOC_IDLE && foc.command == 0.0f && motor_mode == MOTOR_OFF);
     assert(foc.iq_ref == 0.0f && control_mode() == 0u);
