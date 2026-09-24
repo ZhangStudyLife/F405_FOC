@@ -51,22 +51,22 @@ def capture(port, seconds, group):
             last_data = now
             pending.extend(data)
             if not synced:
-                # Discard complete frames from the previous DTR session until the
-                # requested group appears; do not mistake stale bytes for a test frame.
-                while True:
-                    pos = pending.find(TERMINATOR)
-                    if pos < CHANNELS * 4:
-                        if len(pending) > 4096:
-                            del pending[:-FRAME_BYTES]
-                        break
-                    start = pos - CHANNELS * 4
+                # Find a complete frame by its fixed 32-byte body plus terminator;
+                # a JustFloat sequence may also occur inside payload floats.
+                found = None
+                for start in range(max(0, len(pending) - 4096), len(pending) - FRAME_BYTES + 1):
+                    if pending[start + CHANNELS * 4:start + FRAME_BYTES] != TERMINATOR:
+                        continue
                     index = header.unpack_from(pending, start + 4)[1]
-                    del pending[:pos + len(TERMINATOR)]
                     if index >> 24 == group:
-                        synced = True
+                        found = start
                         break
-                if not synced:
+                if found is None:
+                    if len(pending) > 8192:
+                        del pending[:-FRAME_BYTES]
                     continue
+                del pending[:found + FRAME_BYTES]
+                synced = True
             used = 0
             while len(pending) - used >= FRAME_BYTES:
                 if bytes(pending[used + CHANNELS * 4:used + FRAME_BYTES]) != TERMINATOR:
