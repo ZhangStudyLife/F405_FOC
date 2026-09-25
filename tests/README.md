@@ -32,13 +32,13 @@ gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Hardware/mt6835 tests/test_mt6835_
 ./build/test_mt6835_crc.exe
 gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Protocols/JustFloat -I App/Hardware/bsp tests/test_justfloat.c -o build/test_justfloat.exe
 ./build/test_justfloat.exe
-gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Control -I App/FOC -I App/Protocols/JustFloat -I App/Hardware/bsp -I App/Hardware/mt6835 tests/test_app_usb.c App/Control/app.c App/Control/control.c App/FOC/foc.c -lm -o build/test_app_usb.exe
+gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Config -I App/Control -I App/FOC -I App/Protocols/JustFloat -I App/Hardware/bsp -I App/Hardware/mt6835 tests/test_app_usb.c App/Control/app.c App/Control/control.c App/FOC/foc.c -lm -o build/test_app_usb.exe
 ./build/test_app_usb.exe
-gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Control -I App/FOC -I App/Hardware/bsp -I App/Hardware/mt6835 tests/test_control_pid.c tests/foc_stub.c App/Control/control.c -lm -o build/test_control_pid.exe
+gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Config -I App/Control -I App/FOC -I App/Hardware/bsp -I App/Hardware/mt6835 tests/test_control_pid.c tests/foc_stub.c App/Control/control.c -lm -o build/test_control_pid.exe
 ./build/test_control_pid.exe
 gcc -std=c11 -Wall -Wextra -Werror -O2 -I tests/usb_stubs -I App/Hardware/bsp tests/test_usb_queue.c -o build/test_usb_queue.exe
 ./build/test_usb_queue.exe
-gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/FOC -I App/Control -I App/Hardware/bsp -I App/Hardware/mt6835 tests/test_foc_recalibration.c App/FOC/foc.c App/Control/control.c -lm -o build/test_foc_recalibration.exe
+gcc -std=c11 -Wall -Wextra -Werror -O2 -I App/Config -I App/FOC -I App/Control -I App/Hardware/bsp -I App/Hardware/mt6835 tests/test_foc_recalibration.c App/FOC/foc.c App/Control/control.c -lm -o build/test_foc_recalibration.exe
 ./build/test_foc_recalibration.exe
 ```
 

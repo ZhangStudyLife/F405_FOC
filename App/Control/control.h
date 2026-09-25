@@ -12,7 +12,6 @@ bool control_torque(float amps);      /* Target Iq, amps. */
 bool control_speed(float rpm);        /* Target speed, RPM, signed. */
 bool control_position(float deg);     /* Target position, mechanical degrees, multi-turn. */
 bool control_motion(float rpm, float acceleration, float jerk);
-bool control_hold_position(void);     /* Re-target the last position, still scheduled. */
 bool control_zero(void);              /* Redefine the current position as 0 deg. */
 void control_stop(void);              /* stop/trip: torque mode, cleared integrators. */
 

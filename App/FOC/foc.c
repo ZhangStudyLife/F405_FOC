@@ -30,12 +30,6 @@ float foc_wrap(float radians)
     return radians - floorf(radians / TURN) * TURN;
 }
 
-void foc_integrators(float *d, float *q)
-{
-    *d = integral_d;
-    *q = integral_q;
-}
-
 float foc_modulate(float a, float beta, float bus_voltage, float duty[3])
 {
     float b = -0.5f * a + 0.8660254038f * beta;
@@ -142,7 +136,7 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
     float s, c;
     /* This encoder: repeatable second harmonic measured during unpowered coast. */
     sincos_fast(mechanical_deg * (PI / 90.0f), &s, &c);
-    mechanical_deg += 0.52f * c;
+    mechanical_deg += MOTOR_ENCODER_HARMONIC_DEG * c;
     float delta = mechanical_deg - previous;
     if (delta > 180.0f) delta -= 360.0f;
     if (delta < -180.0f) delta += 360.0f;
@@ -174,8 +168,8 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         return;
     }
     if (!foc.zero_ready) { foc.id = foc.iq = 0.0f; return; }
-    float omega = (float)foc.calibration.direction * 7.0f * foc.rpm * (TURN / 60.0f);
-    float theta = foc_wrap((float)foc.calibration.direction * 7.0f * mechanical_deg * (PI / 180.0f) -
+    float omega = (float)foc.calibration.direction * MOTOR_POLE_PAIRS * foc.rpm * (TURN / 60.0f);
+    float theta = foc_wrap((float)foc.calibration.direction * MOTOR_POLE_PAIRS * mechanical_deg * (PI / 180.0f) -
                           foc.calibration.zero - omega * encoder_delay);
     foc.electrical_deg = theta * (180.0f / PI);
     sincos_fast(theta, &s, &c);
@@ -184,8 +178,8 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
     foc.id = ia * c + beta * s;
     foc.iq = -ia * s + beta * c;
     if (foc.state == FOC_PRECHARGE || foc.state == FOC_RUN || foc.state == FOC_CALIBRATE) {
-        float trip = 10.0f;
-        if (fabsf(ia) >= trip || fabsf(ib) >= trip || fabsf(ic) >= trip) { foc_trip(FOC_CURRENT); return; }
+        if (fabsf(ia) >= MOTOR_PHASE_CURRENT_TRIP_A || fabsf(ib) >= MOTOR_PHASE_CURRENT_TRIP_A ||
+            fabsf(ic) >= MOTOR_PHASE_CURRENT_TRIP_A) { foc_trip(FOC_CURRENT); return; }
         if (!aligning && fabsf(foc.rpm) >= FOC_SPEED_MAX) { foc_trip(FOC_SPEED); return; }
     }
     if (foc.state == FOC_PRECHARGE) {
@@ -210,8 +204,8 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         /* 600 Hz PI, R=.12 ohm, L=50 uH; no feedback low-pass.
            Back calculation Tt=L/R. Feedforward uses nominal motor parameters. */
         float ed = -foc.id, eq = foc.iq_ref - foc.iq;
-        float ud = 0.1884955592f * ed + integral_d - omega * 50e-6f * foc.iq;
-        float uq = 0.1884955592f * eq + integral_q + omega * (50e-6f * foc.id + 0.0021f);
+        float ud = MOTOR_CURRENT_KP * ed + integral_d - omega * MOTOR_INDUCTANCE_H * foc.iq;
+        float uq = MOTOR_CURRENT_KP * eq + integral_q + omega * (MOTOR_INDUCTANCE_H * foc.id + MOTOR_FLUX_WB);
         /* Linear SVPWM ceiling; modulation also accounts for the ADC window. */
         float limit = bus_voltage * 0.5773502692f;
         float norm2 = ud * ud + uq * uq;
@@ -225,17 +219,18 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         float so = s * ca + c * sa, co = c * ca - s * sa;
         scale = foc_modulate(foc.ud * co - foc.uq * so, foc.ud * so + foc.uq * co, bus_voltage, foc.duty);
         foc.ud *= scale; foc.uq *= scale;
-        integral_d += 0.0226194671f * ed + 0.12f * (foc.ud - ud);
-        integral_q += 0.0226194671f * eq + 0.12f * (foc.uq - uq);
+        integral_d += MOTOR_CURRENT_KI_TS * ed + MOTOR_CURRENT_ANTI_WINDUP * (foc.ud - ud);
+        integral_q += MOTOR_CURRENT_KI_TS * eq + MOTOR_CURRENT_ANTI_WINDUP * (foc.uq - uq);
     } else if (foc.state == FOC_CALIBRATE) {
         ++ticks;
-        float theta = 0.0f, ud = 0.6f; /* 0.3 V failed; 0.6 V verified on this motor. */
+        float theta = 0.0f, ud = MOTOR_ALIGN_VOLTAGE_V;
         if (ticks <= 10000u) ud *= (float)ticks / 10000.0f;
         if (ticks == 30000u) origin = position;
         if (ticks > 30000u && ticks <= 70000u) theta = TURN * (float)(ticks - 30000u) / 40000.0f;
         if (ticks == 70000u) {
             forward = position - origin;
-            if (fabsf(forward) < (360.0f / 7.0f) * 0.8f || fabsf(forward) > (360.0f / 7.0f) * 1.2f) {
+            if (fabsf(forward) < (360.0f / MOTOR_POLE_PAIRS) * 0.8f ||
+                fabsf(forward) > (360.0f / MOTOR_POLE_PAIRS) * 1.2f) {
                 foc_trip(FOC_ALIGNMENT); return;
             }
         }
@@ -252,7 +247,8 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
                 foc_trip(FOC_ALIGNMENT); return;
             }
             foc.calibration.direction = forward > 0.0f ? 1 : -1;
-            foc.calibration.zero = foc_wrap((float)foc.calibration.direction * 7.0f * atan2f(sum_sin, sum_cos));
+            foc.calibration.zero = foc_wrap((float)foc.calibration.direction * MOTOR_POLE_PAIRS *
+                                            atan2f(sum_sin, sum_cos));
             foc_stop();
             foc.state = FOC_SAVE;
             return;

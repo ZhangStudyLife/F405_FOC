@@ -3,11 +3,12 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "motor_config.h"
 
 #define FOC_BUS_MIN 8.0f
 #define FOC_BUS_MAX 36.0f
-#define FOC_SPEED_MAX 8600.0f /* 5010-KV360 rated maximum, RPM. */
-#define FOC_CURRENT_MAX 5.0f  /* Commandable Iq, A; also the outer-loop limit. */
+#define FOC_SPEED_MAX MOTOR_SPEED_MAX_RPM
+#define FOC_CURRENT_MAX MOTOR_CURRENT_MAX_A
 
 /* Nominal timing, pending scope validation of ADC/driver/analog delays. */
 #ifndef FOC_TRIGGER_TICKS
@@ -44,9 +45,6 @@ void foc_trip(uint32_t fault);
 void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_voltage, float encoder_delay);
 void foc_outer_step(void); /* Run the 1 kHz outer loop after this cycle's PWM write. */
 float foc_wrap(float radians);
-/* PI integrator states, volts. Read-only telemetry for the current loop; they
-   are internal state a host cannot reconstruct from the other channels. */
-void foc_integrators(float *d, float *q);
 /* Returns applied vector scale for PI anti-windup; shifts common mode for ADC. */
 float foc_modulate(float alpha, float beta, float bus_voltage, float duty[3]);
 bool foc_window(const float duty[3]);

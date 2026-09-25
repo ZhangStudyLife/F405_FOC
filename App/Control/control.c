@@ -7,9 +7,6 @@
    the outer loop can never ask for more than a manual `Iq` command could.
    Tuning order: speed Kp first until it tracks without oscillating, then speed
    Ki to remove the steady-state error, then position Kp. */
-#define SPEED_KP 0.005f         /* A/RPM. 100 RPM error -> 0.5 A. */
-#define SPEED_KI 0.01f          /* A/(RPM*s). */
-#define POSITION_KP 4.0f       /* RPM per degree. */
 #define CONTROL_BANDWIDTH 0.1f  /* Integrator back-calculation gain. */
 #define CONTROL_PERIOD_US 1000u /* Outer-loop period; runs once per millisecond. */
 #define CONTROL_JUMP_US 4000u   /* Gap above this is a discontinuity, not a dt. */
@@ -124,13 +121,6 @@ bool control_motion(float rpm, float acceleration, float jerk)
     return true;
 }
 
-bool control_hold_position(void)
-{
-    if (!start(CONTROL_POSITION, 0.0f)) return false;
-    position_target = position; /* Stop where we are, but keep holding it. */
-    return true;
-}
-
 bool control_zero(void)
 {
     if (foc.state != FOC_IDLE || fabsf(foc.rpm) >= 5.0f) return false;
@@ -146,7 +136,7 @@ static void position_profile(float dt)
 {
     float error = position_target - position;
     float direction = error > 0.0f ? 1.0f : error < 0.0f ? -1.0f : 0.0f;
-    float desired = fminf(motion_speed, POSITION_KP * fabsf(error)) * direction;
+    float desired = fminf(motion_speed, MOTOR_POSITION_KP * fabsf(error)) * direction;
     float v = fmaxf(fabsf(profile_speed), fabsf(speed)) * 6.0f;
     float a = motion_accel * 6.0f, j = motion_jerk * 6.0f;
     float stop = v * v / (2.0f * a) + v * a / (2.0f * j);
@@ -170,11 +160,11 @@ static float outer_output(float dt)
 {
     if (mode == CONTROL_POSITION) position_profile(dt);
     float error = speed_target - speed;
-    float wanted = SPEED_KP * error + integral_speed;
+    float wanted = MOTOR_SPEED_KP * error + integral_speed;
     float limited = wanted;
     if (limited > FOC_CURRENT_MAX) limited = FOC_CURRENT_MAX;
     if (limited < -FOC_CURRENT_MAX) limited = -FOC_CURRENT_MAX;
-    integral_speed += SPEED_KI * error * dt;
+    integral_speed += MOTOR_SPEED_KI * error * dt;
     if (limited != wanted) integral_speed += CONTROL_BANDWIDTH * (limited - wanted);
     if (integral_speed > FOC_CURRENT_MAX) integral_speed = FOC_CURRENT_MAX;
     if (integral_speed < -FOC_CURRENT_MAX) integral_speed = -FOC_CURRENT_MAX;
