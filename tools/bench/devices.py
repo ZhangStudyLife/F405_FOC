@@ -165,8 +165,13 @@ class StudentPower:
         self.send(READ, 0xFF)
 
     def configure(self, volts, amps=5.0):
+        before = self.last_full_ns
+        self.poll()
+        self._wait(lambda: self.last_full_ns > before, 2.0)
         if volts > self.state.max_voltage or amps > self.state.max_current:
-            raise RuntimeError("电源设定超过设备额定范围")
+            raise RuntimeError(f"电源设定超过设备额定范围：请求 {volts:.2f} V/{amps:.2f} A，当前上限 {self.state.max_voltage:.2f} V/{self.state.max_current:.2f} A")
+        if self.state.protection_status:
+            raise RuntimeError(f"学生电源已有保护 {self.state.protection_status}，拒绝上电")
         before = self.last_full_ns
         self.send(WRITE, 0xC1, float_payload(volts))
         self.send(WRITE, 0xC2, float_payload(amps))
