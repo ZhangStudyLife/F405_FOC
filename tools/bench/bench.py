@@ -843,7 +843,7 @@ def custom_case(mode, shape):
 def menu(args):
     while True:
         print("\n====== F405 电机台架 ======\n1. 速度测试\n2. 位置测试\n"
-              "3. 全量测试\n4. 设备与电源\n5. 数据报告\n0. 退出")
+              "3. 全量测试\n4. 设备与电源\n5. 数据报告\n0. 退出\n", flush=True)
         choice = input("请选择：").strip()
         if choice == "0":
             return 0
