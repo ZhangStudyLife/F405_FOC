@@ -55,7 +55,8 @@ def _columns(group):
 
 COLUMNS = {group: _columns(group) for group in GROUP_CHANNELS}
 
-GROUP_NAMES = {0: "raw", 1: "current", 2: "voltage", 3: "control"}
+GROUP_NAMES = {0: "raw", 1: "current", 2: "voltage", 3: "control",
+               4: "vector", 5: "limit", 6: "current_loop", 7: "state"}
 
 # FOC state machine and fault codes, App/FOC/foc.h.
 STATE_NAMES = ["IDLE", "PRECHARGE", "CALIBRATE", "SAVE", "RUN", "FAULT", "OFFSET"]

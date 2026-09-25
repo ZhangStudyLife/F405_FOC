@@ -160,8 +160,8 @@ def position_cases(volts=24.0):
     return cases
 
 
-MODES = {"torque": torque_cases, "speed": speed_cases, "position": position_cases}
-MODE_ZH = {"torque": "力矩", "speed": "速度", "position": "位置"}
+MODES = {"speed": speed_cases, "position": position_cases}
+MODE_ZH = {"speed": "速度", "position": "位置"}
 
 
 # ------------------------------------------------------------------ execution
@@ -365,7 +365,7 @@ def run_case(link, out_dir, experiment, group, limits, monitor, supply=None,
     if flags.get("faults") or not flags.get("dt_ok", False):
         error = error or f"采样故障：丢帧 {flags.get('gaps')}，故障帧 {flags.get('faults')}"
     result = assess(table, loaded) if not error else "故障"
-    print(f"  {MODE_ZH[experiment.mode]}/{experiment.case} 组{group} 第{repeat+1}轮 "
+    print(f"\r  [完成] {MODE_ZH[experiment.mode]}/{experiment.case} 组{group} 第{repeat+1}轮 "
           f"{len(table)}帧，原始 {meta['raw_bytes']/1e6:.2f} MB → "
           f"{os.path.getsize(archive)/1e6:.2f} MB，耗时 {time.monotonic()-started:.2f} 秒，{result}")
     if error:
@@ -842,13 +842,13 @@ def custom_case(mode, shape):
 
 def menu(args):
     while True:
-        print("\n====== F405 电机台架 ======\n1. 力矩测试\n2. 速度测试\n3. 位置测试\n"
-              "4. 全量测试\n5. 设备与电源\n6. 数据报告\n0. 退出")
+        print("\n====== F405 电机台架 ======\n1. 速度测试\n2. 位置测试\n"
+              "3. 全量测试\n4. 设备与电源\n5. 数据报告\n0. 退出")
         choice = input("请选择：").strip()
         if choice == "0":
             return 0
-        if choice in ("1", "2", "3"):
-            mode = {"1": "torque", "2": "speed", "3": "position"}[choice]
+        if choice in ("1", "2"):
+            mode = {"1": "speed", "2": "position"}[choice]
             print("1. 综合预设  2. 固定  3. 阶跃  4. 斜坡  5. 正弦  6. 方波  7. 三次曲线")
             print("8. 特项列表（起动阈值/低速整圈/长行程等）  0. 返回")
             kind = input("请选择工况：").strip()
@@ -878,18 +878,18 @@ def menu(args):
                 command_run(args)
             except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
                 print(f"台架错误：{exc}")
-        elif choice == "4":
+        elif choice == "3":
             args.all, args.mode, args.case, args.custom_experiment = True, None, None, None
             args.buses = "24,18,12"
             try:
                 command_run(args)
             except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
                 print(f"台架错误：{exc}")
-        elif choice == "5":
+        elif choice == "4":
             command_list(args)
             print("学生电源候选：" + ", ".join(devices.ports({(0x2E3C, 0x5740)})))
             print("CH340 候选：" + ", ".join(devices.ports({(0x34B7, 0x6877), (0x1A86, 0x7523)})))
-        elif choice == "6":
+        elif choice == "5":
             directory = input("数据目录：").strip()
             if directory:
                 command_report(argparse.Namespace(directory=directory))
