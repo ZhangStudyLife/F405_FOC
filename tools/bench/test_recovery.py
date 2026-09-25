@@ -33,7 +33,7 @@ class RecoveryTests(unittest.TestCase):
         def power(enabled):
             self.assertFalse(active)
         supply.output.side_effect = power
-        fresh.listen.return_value = [SimpleNamespace(group=3, fault=8)]
+        fresh.listen.return_value = [SimpleNamespace(fault=8)]
         args = SimpleNamespace(sn="test", stlink_sn="probe")
         with patch.object(bench.bench, "find_port", return_value=SimpleNamespace(device="test", serial_number="test")), \
              patch.object(bench.bench, "Link", return_value=fresh), \
@@ -52,7 +52,7 @@ class RecoveryTests(unittest.TestCase):
         with patch.object(bench.bench, "find_port", return_value=SimpleNamespace(device="test", serial_number="test")), \
              patch.object(bench.bench, "Link", return_value=fresh), \
              patch.object(bench, "reset_board") as reset:
-            with self.assertRaisesRegex(RuntimeError, "组 3"):
+            with self.assertRaisesRegex(RuntimeError, "有效遥测"):
                 bench.recover(old, None, supply, SimpleNamespace(sn="test"), 24, "USB timeout")
             reset.assert_called_once()
             supply.output.assert_called_once_with(False)

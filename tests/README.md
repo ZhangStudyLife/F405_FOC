@@ -9,19 +9,19 @@
 |---|---|---|---|
 | `test_mt6835_crc.c` | 主机测试 | 当前 | 磁编解码：边界角度、独立逐位 CRC 参考、全部单比特损坏、传感器故障状态、历史真实帧 |
 | `test_justfloat.c` | 主机测试 | 当前 | 两种传输的帧字节：精确帧、参数单次求值、16 通道上限、NaN、发送被拒 |
-| `test_app_usb.c` | 主机测试 | 当前 | 真实 `app.c` + `foc.c` + `control.c`：四组 12 float 帧布局、头字位打包、`send` 切组、`Iq`/`rpm`/`pos`/`zero`/`hello` 解析与拒绝、CR/LF/CRLF、拆包/粘包、UART/USB 独立组行、会话切换、20,000 帧、10 A/s 斜坡与 motion 指令、外环参考替换 |
+| `test_app_usb.c` | 主机测试 | 当前 | 真实 `app.c` + `foc.c` + `control.c`：64 字节/15 float 完整帧、头字位打包、`Iq`/`rpm`/`pos`/`zero`/`hello` 解析与拒绝、CR/LF/CRLF、拆包/粘包、UART/USB 独立组行、会话切换、2,000 帧/秒分频、10 A/s 斜坡与 motion 指令、外环参考 |
 | `test_control_pid.c` | 主机测试 | 当前 | 真实 `control.c` + 一阶被控对象：速度跟踪（±）、输出限幅与抗饱和、目标保持、多圈位置收敛与反向、`zero`、`stop` 复位 |
 | `test_usb_queue.c` | 主机测试 | 当前 | 直接包含生产 `bsp_usb.c`：20,000 帧逐字节比对、BUSY 重试、缓冲所有权、环形/计数器回绕、溢出锁存、复位统计、RX 背压（用 `usb_stubs/` 替代 CDC 回调） |
 | `test_foc_recalibration.c` | 主机测试 | 当前 | 校准状态机回归：零偏采集 → `foc_calibrate()` → 对齐 → `FOC_SAVE`，方向判定与 600 转滑行 |
-| `capture_usb.py` | PC 脚本 | 当前 | 单组 20 kHz 流长跑校验：DTR 会话排空、帧尾对齐、`seq` 差 1 与 µs 差 50 的连续性、速率 19,800..20,200 帧/s |
+| `capture_usb.py` | PC 脚本 | 当前 | 完整 2 kHz 流长跑校验：DTR 会话排空、帧尾对齐、`seq` 差 10 与 µs 差 500 的连续性、速率 1,980..2,020 帧/s |
 | `foc_stub.c` | 夹具 | 当前 | 给 `test_control_pid.c` 用的最小 `foc.c` 状态机替身，不链接完整电流环 |
 | `usb_stubs/usbd_cdc_if.h` | 夹具 | 当前 | 只给 `test_usb_queue.c` 用的最小 CDC/USBD 声明 |
 | `legacy/test_foc.c` | 主机测试 | 历史 | 电压模式 FOC 数学、缓升、窗口与校准仿真，见下 |
 | `legacy/test_foc_commands.c` | 主机测试 | 历史 | 电压模式命令、关断、校准记录校验 |
 | `legacy/capture_foc.py` | PC 脚本 | 历史 | 48 字节 / 11 float 电压模式协议记录与 `run <V>` 试验 |
 
-针对台架的工况库、四组数据采集、归档与报告在 [tools/bench/](../tools/bench/README.md)；
-`capture_usb.py` 只做单组流的长跑校验，不产生数据集。
+针对台架的工况库、单一完整字段表、归档与报告在 [tools/bench/](../tools/bench/README.md)；
+`capture_usb.py` 只做完整流的长跑校验，不产生数据集；`tools/bench/foc_capture.py` 下载 20 kHz FOC3 RAM 采集并输出 CSV。
 
 ## 可重复的主机测试
 
@@ -66,8 +66,8 @@ Debug/Release 构建。
 
 | 文档 | 覆盖内容 |
 |---|---|
-| [USB_TEST.md](USB_TEST.md) | USB FS CDC：36 字节 / 8 通道 20 kHz 布局、VOFA+ 设置、USB 命令、64 KB 队列与完整性边界、主机测试、短测/长测/CPU 插桩/UART 对比 |
-| [UART_TEST.md](UART_TEST.md) | USART2 2 Mbps：64 字节 / 15 float 2 kHz 布局、串口命令、驱动约束、波特率阶梯与长测、命令接收核验、Debug 实时路径修复 |
+| [USB_TEST.md](USB_TEST.md) | USB FS CDC：64 字节 / 15 float 2 kHz 控制日志、VOFA+ 设置、USB 命令、64 KB 队列、历史短测/长测/CPU 插桩 |
+| [UART_TEST.md](UART_TEST.md) | USART2 2 Mbps：64 字节 / 15 float 20 Hz 安全状态帧、串口命令、驱动约束、波特率阶梯与历史长测 |
 | [SAMPLING_TEST.md](SAMPLING_TEST.md) | 采样链路：TIM8 + 双 ADC + SPI/DMA 调度、ADC 采样时间优化、20 kHz 周期与 CPU 口径、MT6835 编码器与故障注入 |
 | [CUBEMX_TEST.md](CUBEMX_TEST.md) | CubeMX 配置与 USB 集成：6.15.0 两次生成的工具/时钟/引脚设置、生成前后外设 SHA256 核对、USER CODE 保留、日志诊断分类、构建占用与未执行边界 |
 | [FOC_TEST.md](FOC_TEST.md) | 电机控制：2026-09-20 电压模式历史记录（命令、帧、校准、Flash 记录、实测），当前电流模式见 `App/README.md` |

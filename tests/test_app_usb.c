@@ -25,8 +25,8 @@ extern volatile uint32_t app_command_rejected;
 static const char *uart_input, *usb_input;
 static size_t uart_left, usb_left;
 static unsigned frames;
-/* The 8 float channels and the JustFloat terminator from app.c. */
-static uint32_t latest[9];
+/* The 15 float channels and the JustFloat terminator from app.c. */
+static uint32_t latest[16];
 
 uint32_t bsp_motor_lock(void) { return 0u; }
 void bsp_motor_unlock(uint32_t key) { (void)key; }
@@ -49,7 +49,7 @@ static uint32_t s_uart_frames;
 bool bsp_uart_write(const void *data, size_t size)
 {
     (void)data;
-    assert(size > 0u && size <= 256u); /* 15 float telemetry, or the hello banner. */
+    assert(size > 0u && size <= 256u); /* UART status telemetry or the hello banner. */
     if (size == 64u) ++s_uart_frames;
     return true;
 }
@@ -57,8 +57,8 @@ bool bsp_usb_ready(void) { return true; }
 void bsp_usb_poll(void) {}
 bool bsp_usb_write(const void *data, size_t size)
 {
-    assert(size == 9u * sizeof(float));
-    assert(isinf(((const float *)data)[8]));
+    assert(size == 16u * sizeof(float));
+    assert(isinf(((const float *)data)[15]));
     memcpy(latest, data, size); ++frames; return true;
 }
 static size_t read_input(void *data, size_t size, const char **input, size_t *left)
@@ -116,41 +116,35 @@ int main(void)
     const char *bad[] = {"Iq nan\r", "Iq inf\r", "Iq 5.01\r", "Iq -5.01\r",
         "Iq 0.123\r", "Iq 1e0\r", "Iq .5\r", "Iq 1.\r", "Iq 0.2junk\r",
         "Iq 0000000000000000000000000000000000001\r", "Iq 0.\00120\r",
-        "send 8\r", "send -1\r", "send\r", "send 0 extra\r", "send \r",
+        "send 0\r", "send 8\r", "send -1\r", "send\r", "send 0 extra\r", "send \r",
         "rpm nan\r", "rpm 9400.01\r", "pos 1000001\r", "position 10\r", "zero 1\r"};
     for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
         unsigned rejected = app_command_rejected;
         usb(bad[i]);
         assert(app_command_rejected == rejected + 1u && foc.command == 0.35f);
     }
-    /* send X selects the logging group without disturbing the reference. */
-    unsigned rejected = app_command_rejected;
-    usb("send 2\r"); assert(app_command_rejected == rejected && foc.command == 0.35f);
     usb("Iq 0."); ++g_usb_stats.sessions; usb("45\r");
     assert(foc.command == 0.35f); /* Old session prefix cannot start a command. */
     usb("Iq 0.50\r"); assert(foc.command == 0.5f);
 
-    /* Eight floats per frame; eight groups lower USB bandwidth while preserving
-       the two packed headers and six selected payload values. */
-    static const char *rotate[] = {"send 0\r", "send 1\r", "send 2\r", "send 3\r",
-                                   "send 4\r", "send 5\r", "send 6\r", "send 7\r"};
-    rejected = app_command_rejected;
-    usb("send 0\r");
+    /* One compact 13-channel record is sent per 10 FOC samples (2 kHz). */
     for (unsigned n = 0; n < 20000u; ++n) {
-        unsigned cycle = n / 2000u;
-        if (n && n % 2000u == 0u) usb(rotate[(cycle - 1u) & 7u]);
-
         motor_sample_us = (0xffff00u + n * 50u) & 0xffffffu;
         app_sample();
-        assert((word() & 0xffffffu) == motor_sample_us);
-        assert(((word() >> 24) & 7u) == foc.state);
-        assert((index_word() >> 24) < 8u);
-        assert((index_word() & 0xffffffu) == ((n + 1u) & 0xffffffu));
+        if ((n + 1u) % 10u == 0u) {
+            assert((word() & 0xffffffu) == motor_sample_us);
+            assert(((word() >> 24) & 7u) == foc.state);
+            assert(index_word() == ((n + 1u) & 0xffffffu));
+            assert(channel(2) == foc.id && channel(3) == foc.iq && channel(4) == foc.iq_ref);
+            assert(channel(5) == foc.ud && channel(6) == foc.uq);
+            assert(channel(7) == adc_sample.bus_voltage && channel(8) == mt6835_angle_deg);
+            assert(channel(9) == foc.electrical_deg && channel(10) == control_speed_rpm());
+            assert(channel(11) == control_speed_target() && channel(12) == control_position_deg());
+            assert(channel(13) == control_position_target() && channel(14) == (float)control_mode());
+        }
     }
-    assert(frames == 20000u && foc.state == FOC_RUN);
-    /* The 20 Hz UART frame stays 15 float + terminator while USB changes. */
+    assert(frames == 2000u && foc.state == FOC_RUN);
     assert(s_uart_frames == 20u);
-    /* Every commutated sample was logged: one USB frame per app_sample(). */
 
     /* Reference chain: the 10 A/s ramp converges, then holds the target. */
     assert(fabsf(foc.iq_ref - 0.5f) < 1e-4f);
@@ -165,12 +159,13 @@ int main(void)
     }
     assert(fabsf(foc.iq_ref - 0.2f) < 1e-4f && foc.command == 0.2f);
     /* Outer-loop output replaces the current reference, mode 3 reports it. */
-    usb("send 3\r");
     motor_sample_us = (motor_sample_us + 50u) & 0xffffffu;
-    app_sample(); /* The outer loop runs once per millisecond of samples. */
-    assert(index_word() >> 24 == 3u);
-    assert(channel(2) == foc.iq_ref && channel(6) == foc.rpm);
-    assert(channel(3) == control_speed_target() && channel(5) == control_position_target());
+    for (unsigned n = 0; n < 9u; ++n) {
+        motor_sample_us = (motor_sample_us + 50u) & 0xffffffu;
+        app_sample();
+    }
+    assert(channel(4) == foc.iq_ref && channel(10) == control_speed_rpm());
+    assert(channel(11) == control_speed_target() && channel(13) == control_position_target());
 
     usb("stop\r"); assert(foc.state == FOC_IDLE && foc.command == 0.0f && motor_mode == MOTOR_OFF);
     assert(foc.iq_ref == 0.0f && control_mode() == 0u);
@@ -194,7 +189,7 @@ int main(void)
     /* `hello` answers on UART only, so the binary USB stream stays framed. */
     unsigned before = app_command_rejected;
     assert(app_command("hello") && app_command_rejected == before);
-    puts("PASS: 4-group 12-float USB layout, status word, send/rpm/pos/zero parsing,"
+    puts("PASS: 15-float 2 kHz USB layout, status word, rpm/pos/zero parsing,"
          " 20k frames, 10 A/s ramp, motion parsing, outer-loop reference selection");
     return 0;
 }

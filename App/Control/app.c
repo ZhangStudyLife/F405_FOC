@@ -12,17 +12,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define FOC_FRAME_CHANNELS 8u /* 2 headers plus 6 payload channels; 36 B at 20 kHz. */
-/* FOC_EDGE_LIMIT / 4200 from foc.c: sample-window ceiling on the vector span. */
-#define FOC_EDGE_FRACTION 0.1211428571f
+#define FOC_FRAME_CHANNELS 15u /* 2 headers plus 13 control channels. */
+#define USB_TELEMETRY_DIVIDER 10u
 
-/* High-speed USB logging group, selected by `send X`; telemetry only. */
-static volatile uint8_t telemetry_group;
-/* One USB frame: two header words then the group payload, all float32. */
+/* Normal USB logging contains only control data; FOC_CAPTURE keeps raw data. */
 static float s_usb_frame[FOC_FRAME_CHANNELS + 1u];
 
 static volatile uint32_t last_frame;
 static volatile uint16_t divider;
+static volatile uint8_t usb_divider;
 static uint32_t sequence;
 #ifdef FOC_CAPTURE
 /* Debug build only; frozen before foreground export. No DMA reads this array. */
@@ -65,68 +63,21 @@ static uint32_t status_word(void)
     return foc.state | (foc.fault << 3) | ((uint32_t)(motor_mode == MOTOR_PWM) << 7);
 }
 
-/* 20 kHz USB logging: one group at a time, 8 float32 plus the JustFloat
-   terminator. Group 0 carries raw sensor truth, group 1 current-loop internals,
-   group 2 the applied voltage, group 3 the reference and mechanical response.
-   Channels that a host can reconstruct offline are deliberately absent. */
-static void telemetry_usb(const float sampled_duty[3])
+/* One 2 kHz USB frame carries the control-loop record. */
+static void telemetry_usb(void)
 {
     union { float f; uint32_t u; } time, index;
     time.u = (motor_sample_us & 0xffffffu) | (status_word() << 24);
-    index.u = ((sequence & 0xffffffu) | ((uint32_t)telemetry_group << 24));
+    index.u = sequence & 0xffffffu;
     float *payload = s_usb_frame;
     payload[0] = time.f;
     payload[1] = index.f;
-    switch (telemetry_group) {
-    case 0: /* raw ADC/angle and first sampled PWM value */
-        payload[2] = (float)adc_raw_b; payload[3] = (float)adc_raw_c;
-        payload[4] = (float)adc_raw_bus; payload[5] = mt6835_raw_deg;
-        payload[6] = mt6835_angle_deg;
-        payload[7] = (float)(uint32_t)(sampled_duty[0] * 4200.0f + 0.5f);
-        break;
-    case 1: /* remaining sampled PWM and current offsets */
-        payload[2] = (float)(uint32_t)(sampled_duty[1] * 4200.0f + 0.5f);
-        payload[3] = (float)(uint32_t)(sampled_duty[2] * 4200.0f + 0.5f);
-        payload[4] = foc.b_offset; payload[5] = foc.c_offset;
-        payload[6] = adc_sample.b_voltage; payload[7] = adc_sample.c_voltage;
-        break;
-    case 2: { /* phase currents and electrical angle */
-        float integral_d, integral_q; foc_integrators(&integral_d, &integral_q);
-        payload[2] = foc.zero_ready ? (adc_sample.b_voltage - foc.b_offset) * 50.0f : NAN;
-        payload[3] = foc.zero_ready ? (adc_sample.c_voltage - foc.c_offset) * 50.0f : NAN;
-        payload[4] = foc.electrical_deg; payload[5] = foc.iq_ref;
-        payload[6] = integral_d; payload[7] = integral_q;
-        break;
-    }
-    case 3: /* control/reference chain; kept as group 3 for existing tools */
-        payload[2] = foc.iq_ref; payload[3] = control_speed_target();
-        payload[4] = control_position_deg(); payload[5] = control_position_target();
-        payload[6] = control_speed_rpm(); payload[7] = foc.rpm;
-        break;
-    case 4: /* applied vector and CCR */
-        payload[2] = foc.ud; payload[3] = foc.uq;
-        payload[4] = (float)(uint32_t)(foc.duty[0] * 4200.0f + 0.5f);
-        payload[5] = (float)(uint32_t)(foc.duty[1] * 4200.0f + 0.5f);
-        payload[6] = (float)(uint32_t)(foc.duty[2] * 4200.0f + 0.5f);
-        payload[7] = motor_duty[0];
-        break;
-    case 5: /* remaining duty and voltage limits */
-        payload[2] = motor_duty[1]; payload[3] = motor_duty[2];
-        payload[4] = FOC_EDGE_FRACTION * adc_sample.bus_voltage;
-        payload[5] = 0.5773502692f * adc_sample.bus_voltage;
-        payload[6] = control_speed_target(); payload[7] = foc.iq;
-        break;
-    case 6: /* current-loop voltage and offsets */
-        payload[2] = foc.ud; payload[3] = foc.uq;
-        payload[4] = foc.b_offset; payload[5] = foc.c_offset;
-        payload[6] = foc.id; payload[7] = foc.iq;
-        break;
-    default: /* mode and bus complete the control record */
-        payload[2] = control_speed_target(); payload[3] = foc.iq;
-        payload[4] = (float)control_mode(); payload[5] = adc_sample.bus_voltage;
-        payload[6] = control_position_target(); payload[7] = control_position_deg();
-        break;
-    }
+    payload[2] = foc.id; payload[3] = foc.iq; payload[4] = foc.iq_ref;
+    payload[5] = foc.ud; payload[6] = foc.uq; payload[7] = adc_sample.bus_voltage;
+    payload[8] = mt6835_angle_deg; payload[9] = foc.electrical_deg;
+    payload[10] = control_speed_rpm(); payload[11] = control_speed_target();
+    payload[12] = control_position_deg(); payload[13] = control_position_target();
+    payload[14] = (float)control_mode();
     s_usb_frame[FOC_FRAME_CHANNELS] = INFINITY;
     (void)bsp_usb_write(&s_usb_frame, sizeof s_usb_frame);
 }
@@ -153,7 +104,10 @@ void app_sample(void)
     bsp_motor_unlock(key);
     foc_outer_step();
     sequence = (sequence + 1u) & 0xffffffu;
-    if (bsp_usb_ready()) telemetry_usb(duty); /* PWM sampled before this cycle's write. */
+    if (bsp_usb_ready() && ++usb_divider == USB_TELEMETRY_DIVIDER) {
+        usb_divider = 0u;
+        telemetry_usb();
+    }
 #ifdef FOC_CAPTURE
     if (capturing) {
         capture[capture_count++] = (capture_t){sequence,
@@ -174,7 +128,7 @@ void app_sample(void)
         if (!dumping && !quiet)
 #endif
         {
-            /* 20 Hz, 64 bytes: safety monitor; USB carries the 20 kHz dataset. */
+            /* 20 Hz, 64 bytes: low-rate safety monitor. */
             const float frame[] = {foc.id, foc.iq, adc_sample.b_voltage, adc_sample.c_voltage,
                 (float)sequence, foc.rpm, adc_sample.bus_voltage, foc.iq_ref, foc.electrical_deg,
                 foc.ud, foc.uq, duty[0], duty[1], duty[2],
@@ -259,10 +213,7 @@ bool app_command(const char *line)
             !parse_decimal(j, &jerk, 1000000.0f)) return false;
         command = MOTION;
     }
-    else if (!strncmp(line, "send ", 5u) && line[5] >= '0' && line[5] <= '7' && !line[6]) {
-        telemetry_group = (uint8_t)(line[5] - '0');
-        return true;
-    } else return false;
+    else return false;
     uint32_t key = bsp_motor_lock();
     bool ok = true;
     switch (command) {

@@ -1,4 +1,4 @@
-"""F405 电机台架：中文菜单、可复现工况、20 kHz 分组归档。"""
+"""F405 电机台架：中文菜单、可复现工况、2 kHz 完整遥测归档。"""
 import argparse
 import hashlib
 import json
@@ -91,20 +91,8 @@ def torque_cases(volts=24.0):
     return cases
 
 
-SPEED_POINTS = (1, 5, 25, 100, 250, 500, 1000, 2000, 4000, 6000, 7000)
-
-
 def speed_cases(volts=24.0):
     cases = []
-    plan, cursor = [(0, "rpm 0")], .5
-    for sign in (1, -1):
-        for rpm in SPEED_POINTS:
-            plan.append((int(cursor * 1000), f"rpm {sign * rpm}"))
-            cursor += .8 if volts < 24 and rpm > 360 * volts * .9 else 1.5
-        plan.append((int(cursor * 1000), "rpm 0"))
-        cursor += 1.0
-    cases.append(Experiment("speed_atlas", "speed", cursor + .3, plan,
-                            {"points_rpm": list(SPEED_POINTS)}, "正负恒速、起步、跨零、停车"))
     cases.append(Experiment("speed_cross_zero", "speed", 8.0,
                             [(0, "rpm 0"), (500, "rpm 1000"), (3000, "rpm -2000"), (6000, "rpm 0")],
                             {"sequence": [0, 1000, -2000, 0]}, "跨零阶跃"))
@@ -136,28 +124,18 @@ def speed_cases(volts=24.0):
     return cases
 
 
-MOTION_PRESETS = ((500, 5000, 50000), (3000, 20000, 200000), (7000, 50000, 500000))
 POSITION_SPANS = (30, 90, 180, 360, 720, 1800, 3600)
 
 
 def position_cases(volts=24.0):
-    cases = []
-    for index, (rpm, accel, jerk) in enumerate(MOTION_PRESETS, 1):
-        plan, cursor = [], .5
-        for span in POSITION_SPANS:
-            for target in (span, 0, -span, 0):
-                plan.append((int(cursor * 1000), f"pos {target}"))
-                cursor += max(.75, 2 * span / (rpm * 6) + .7)
-        cases.append(Experiment(f"position_profile_{index}", "position", cursor + .5,
-                                plan, {"spans_deg": list(POSITION_SPANS), "motion": (rpm, accel, jerk)},
-                                "多圈往返和中途重规划",
-                                setup=[f"motion {rpm} {accel} {jerk}"]))
-    rpm, accel, jerk = MOTION_PRESETS[-1]
-    cases.append(Experiment("position_long_60turn", "position", 18.0,
-                            [(0, "pos 21600"), (8000, "pos -21600"), (16000, "pos 0")],
-                            {"motion": (rpm, accel, jerk), "optional": True}, "高速长行程专项",
-                            setup=[f"motion {rpm} {accel} {jerk}"]))
-    return cases
+    plan, cursor = [], .5
+    for span in POSITION_SPANS:
+        for target in (span, 0, -span, 0):
+            plan.append((int(cursor * 1000), f"pos {target}"))
+            cursor += max(.75, 2 * span / (500 * 6) + .7)
+    return [Experiment("position_profile_1", "position", cursor + .5,
+                       plan, {"spans_deg": list(POSITION_SPANS), "motion": (500, 5000, 50000)},
+                       "多圈往返和中途重规划", setup=["motion 500 5000 50000"])]
 
 
 MODES = {"speed": speed_cases, "position": position_cases}
@@ -173,7 +151,7 @@ def wait_speed(link, monitor, target, timeout=8.0, supply=None):
     while time.monotonic() < deadline:
         if supply:
             supply.health()
-        frames = link.listen(.02)  # Drain the active 20 kHz stream during spin-up too.
+        frames = link.listen(.02)  # Drain the active USB stream during spin-up too.
         if monitor:
             sample = monitor.health()
             actual = sample["rpm"]
@@ -183,9 +161,7 @@ def wait_speed(link, monitor, target, timeout=8.0, supply=None):
             frame = frames[-1]
             if frame.fault:
                 raise RuntimeError(f"MCU 保护故障 {bench.FAULT_NAMES[frame.fault]}")
-            if frame.group != 3:
-                continue
-            actual = frame.channel(7)
+            actual = frame.channel(10)
         if abs(actual - target) <= max(5.0, .1 * abs(target)):
             stable = stable or time.monotonic()
             if time.monotonic() - stable >= .2:
@@ -196,14 +172,14 @@ def wait_speed(link, monitor, target, timeout=8.0, supply=None):
 
 
 def assess(table, meta):
-    if meta["group"] != 3 or meta["mode"] == "torque":
+    if meta["mode"] == "torque":
         return "已采集"
     index = {name: position for position, name in enumerate(meta["columns"])}
     target_name = "rpm_tgt" if meta["mode"] == "speed" else "pos_tgt"
     actual_name = "rpm" if meta["mode"] == "speed" else "pos_deg"
-    target = table[:, index[f"g3_{target_name}"]] if f"g3_{target_name}" in index else np.zeros(len(table))
-    actual = table[:, index[f"g3_{actual_name}"]]
-    if len(table) < 10000:
+    target = table[:, index[target_name]] if target_name in index else np.zeros(len(table))
+    actual = table[:, index[actual_name]]
+    if len(table) < 1000:
         return "数据不足"
     failures = 0
     evaluated = 0
@@ -215,18 +191,18 @@ def assess(table, meta):
                 abs(wanted) > meta["bus_set_v"] * 360 * .9):
             limited += 1
             continue
-        if stop - start < 10000:
+        if stop - start < 1000:
             continue
         evaluated += 1
         if meta["mode"] == "speed":
             if wanted == 0:
                 continue
-            error = abs(float(np.mean(actual[stop-10000:stop])) - wanted)
+            error = abs(float(np.mean(actual[stop-1000:stop])) - wanted)
             if error > (2.0 if abs(wanted) < 25 else abs(wanted) * .05):
                 failures += 1
         else:
-            error = np.abs(actual[stop-10000:stop] - wanted)
-            rpm = np.abs(table[stop-10000:stop, 6])
+            error = np.abs(actual[stop-1000:stop] - wanted)
+            rpm = np.abs(table[stop-1000:stop, index["rpm"]])
             if np.any(error > 2.0) or np.any(rpm > 5.0):
                 failures += 1
     if failures:
@@ -255,13 +231,13 @@ def alignment(stage):
             "psu_current_note": "约 2 Hz 母线电流趋势，不是相电流或高频测量"}
 
 
-def run_case(link, out_dir, experiment, group, limits, monitor, supply=None,
+def run_case(link, out_dir, experiment, limits, monitor, supply=None,
              voltage=24.0, repeat=0, attempt=0, load=None):
     problem = experiment.check(*limits)
     if problem:
         raise RuntimeError(problem)
     started = time.monotonic()
-    name = f"{experiment.case}_{voltage:g}V_g{group}_r{repeat}_a{attempt}"
+    name = f"{experiment.case}_{voltage:g}V_r{repeat}_a{attempt}"
     stage = os.path.join(out_dir, name)
     os.makedirs(stage, exist_ok=False)
     raw = os.path.join(stage, "frames.f32")
@@ -271,7 +247,6 @@ def run_case(link, out_dir, experiment, group, limits, monitor, supply=None,
     capturing = False
     try:
         link.open_session()
-        link.send("send 3")
         link.listen(.15)
         bench.wait_idle(link)
         if experiment.mode == "position":
@@ -281,7 +256,6 @@ def run_case(link, out_dir, experiment, group, limits, monitor, supply=None,
             link.send(command)
         if experiment.initial_rpm:
             wait_speed(link, monitor, experiment.initial_rpm, supply=supply)
-        link.send(f"send {group}")
         link.drain(.15)
         if monitor:
             monitor.start_log(os.path.join(stage, "uart.jsonl"))
@@ -330,11 +304,11 @@ def run_case(link, out_dir, experiment, group, limits, monitor, supply=None,
             link.close_session()
         except (OSError, RuntimeError):
             pass
-    if not os.path.exists(raw) or os.path.getsize(raw) < 104:
+    if not os.path.exists(raw) or os.path.getsize(raw) < bench.FRAME_BYTES * 2:
         raise RuntimeError(error or "没有采到完整 USB 帧")
     meta = {
-        "schema": 2, "case": experiment.case, "mode": experiment.mode,
-        "group": group, "group_name": bench.GROUP_NAMES[group], "repeat": repeat,
+        "schema": 3, "case": experiment.case, "mode": experiment.mode,
+        "repeat": repeat,
         "attempt": attempt, "bus_set_v": voltage, "load": load or {"name": "空载"},
         "note": experiment.note, "targets": experiment.targets,
         "duration_s": experiment.duration_s, "elapsed_s": round(time.monotonic() - started, 3),
@@ -343,7 +317,7 @@ def run_case(link, out_dir, experiment, group, limits, monitor, supply=None,
         "initial_rpm": experiment.initial_rpm, "sent": scheduler.sent,
         "command_jitter_ms": scheduler.jitter, "raw_bytes": os.path.getsize(raw),
         "limits": {"iq": limits[0], "rpm": limits[1], "pos": limits[2]},
-        "columns": bench.COLUMNS[group], "archive": os.path.basename(archive),
+        "columns": bench.COLUMNS, "archive": os.path.basename(archive),
         "host": time.strftime("%Y-%m-%d %H:%M:%S"), "git": git_revision(),
         "firmware_sha256": firmware_hash(),
         "control_params": {"speed_kp": .005, "speed_ki": .01, "position_kp": 4.0,
@@ -354,7 +328,7 @@ def run_case(link, out_dir, experiment, group, limits, monitor, supply=None,
     }
     try:
         _, _, words = bench.parse_file(raw)
-        meta["continuity"] = bench.continuity(words, group)
+        meta["continuity"] = bench.continuity(words)
     except ValueError as exc:
         meta["continuity"] = {"error": str(exc)}
         error = error or str(exc)
@@ -362,10 +336,10 @@ def run_case(link, out_dir, experiment, group, limits, monitor, supply=None,
     bench.archive(raw, archive, meta)
     table, loaded = bench.load(archive)
     flags = loaded["continuity"]
-    if flags.get("faults") or not flags.get("dt_ok", False):
-        error = error or f"采样故障：丢帧 {flags.get('gaps')}，故障帧 {flags.get('faults')}"
+    if flags.get("faults") or flags.get("header_errors") or not flags.get("dt_ok", False):
+        error = error or f"采样故障：丢帧 {flags.get('gaps')}，头错误 {flags.get('header_errors')}，故障帧 {flags.get('faults')}"
     result = assess(table, loaded) if not error else "故障"
-    print(f"\r  [完成] {MODE_ZH[experiment.mode]}/{experiment.case} 组{group} 第{repeat+1}轮 "
+    print(f"\r  [完成] {MODE_ZH[experiment.mode]}/{experiment.case} 第{repeat+1}轮 "
           f"{len(table)}帧，原始 {meta['raw_bytes']/1e6:.2f} MB → "
           f"{os.path.getsize(archive)/1e6:.2f} MB，耗时 {time.monotonic()-started:.2f} 秒，{result}")
     if error:
@@ -435,7 +409,6 @@ def select_supply(args):
 def preflight(link, monitor, supply=None):
     link.open_session()
     try:
-        link.send("send 3")
         link.listen(.15)
         bench.wait_idle(link)
         wait_speed(link, monitor, 250.0, timeout=8.0, supply=supply)
@@ -484,10 +457,9 @@ def recover(link, monitor, supply, args, voltage, error):
                 fresh = bench.Link(port.device, port.serial_number)
                 fresh.open_session()
                 fresh.send("stop")
-                fresh.send("send 3")
                 frames = fresh.listen(.6)
-                if not frames or frames[-1].group != 3:
-                    raise RuntimeError("重连后没有组 3 状态")
+                if not frames:
+                    raise RuntimeError("重连后没有有效遥测")
                 fresh.close_session()
                 break
             except (OSError, RuntimeError):
@@ -535,17 +507,14 @@ def command_run(args):
     modes = list(MODES) if args.all else ([args.mode] if args.mode else list(MODES))
     voltages = (24.0, 18.0, 12.0) if args.all else tuple(float(v) for v in args.buses.split(","))
     limits = (args.iq_limit, args.rpm_limit, args.pos_limit)
-    groups = [int(g) for g in args.groups.split(",")]
-    if any(g not in range(8) for g in groups) or args.repeat < 1:
-        raise RuntimeError("日志组只能为 0–3，重复次数至少为 1")
+    if args.repeat < 1:
+        raise RuntimeError("重复次数必须大于零")
     work = []
     for voltage in voltages:
         for mode in modes:
             source = [args.custom_experiment] if getattr(args, "custom_experiment", None) else MODES[mode](voltage)
             for experiment in source:
                 if experiment.mode != mode:
-                    continue
-                if experiment.targets.get("optional") and not args.include_long:
                     continue
                 if args.case and experiment.case != args.case:
                     continue
@@ -556,8 +525,8 @@ def command_run(args):
         raise RuntimeError("没有匹配的工况；先用 run --all --dry-run 查看名称")
     if args.uart and args.uart.lower() in ("off", "none") and not args.dry_run:
         raise RuntimeError("电机工况需要 CH340 在线监测；off 不能用于电机运行")
-    total = sum(case.duration_s + (5 if case.initial_rpm else 1.5) for _, case in work) * len(groups) * args.repeat
-    print(f"{len(work)} 个工况 × {len(groups)} 组 × {args.repeat} 次，预计约 {total/60:.1f} 分钟")
+    total = sum(case.duration_s + (5 if case.initial_rpm else 1.5) for _, case in work) * args.repeat
+    print(f"{len(work)} 个工况 × {args.repeat} 次，预计约 {total/60:.1f} 分钟")
     if args.dry_run:
         for voltage, case in work:
             print(f"  {voltage:g} V {MODE_ZH[case.mode]} {case.case} {case.duration_s:.1f} 秒 {case.note}")
@@ -568,7 +537,7 @@ def command_run(args):
     out_dir = os.path.join(root, time.strftime("%Y%m%d_%H%M%S"))
     os.makedirs(out_dir, exist_ok=False)
     session = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "directory": out_dir,
-               "groups": groups, "voltages": voltages, "git": git_revision(),
+               "voltages": voltages, "git": git_revision(),
                "load": {"name": args.load_name, "mass_g": args.load_mass_g,
                         "stl": args.load_stl, "axis": args.load_axis}, "results": []}
     def save():
@@ -626,28 +595,27 @@ def command_run(args):
                                                "status": "未执行", "reason": "起转自检失败"})
                     save()
                     continue
-            for group in groups:
-                for repeat in range(args.repeat):
-                    for attempt in range(2):
-                        try:
-                            result = run_case(link, out_dir, experiment, group, limits, monitor,
-                                              supply, voltage, repeat, attempt, session["load"])
-                            session["results"].append({"voltage": voltage, "case": experiment.case,
-                                "group": group, "repeat": repeat, "status": result, "attempt": attempt})
+            for repeat in range(args.repeat):
+                for attempt in range(2):
+                    try:
+                        result = run_case(link, out_dir, experiment, limits, monitor,
+                                          supply, voltage, repeat, attempt, session["load"])
+                        session["results"].append({"voltage": voltage, "case": experiment.case,
+                            "repeat": repeat, "status": result, "attempt": attempt})
+                        break
+                    except Exception as exc:
+                        session["results"].append({"voltage": voltage, "case": experiment.case,
+                            "repeat": repeat, "status": "故障", "error": str(exc),
+                            "attempt": attempt, "host_ns": time.monotonic_ns(),
+                            "uart": dict(monitor.latest) if monitor and monitor.latest else None,
+                            "power": asdict(supply.state) if supply else None})
+                        save()
+                        if attempt:
+                            failed = True
+                            print(f"本段重试仍失败，已保存残段（{exc}）；跳过本段继续后续工况")
                             break
-                        except Exception as exc:
-                            session["results"].append({"voltage": voltage, "case": experiment.case,
-                                "group": group, "repeat": repeat, "status": "故障", "error": str(exc),
-                                "attempt": attempt, "host_ns": time.monotonic_ns(),
-                                "uart": dict(monitor.latest) if monitor and monitor.latest else None,
-                                "power": asdict(supply.state) if supply else None})
-                            save()
-                            if attempt:
-                                failed = True
-                                print(f"本段重试仍失败，已保存残段（{exc}）；跳过本段继续后续工况")
-                                break
-                            link = recover(link, monitor, supply, args, voltage, exc)
-                    save()
+                        link = recover(link, monitor, supply, args, voltage, exc)
+                save()
     except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
         failed = True
         print(f"测试中止：{exc}")
@@ -706,42 +674,42 @@ def command_report(args):
         table, meta = bench.load(os.path.join(args.directory, name))
         stats = bench.summarise(table, meta)
         flags = meta.get("continuity", {})
-        rows.append((meta["case"], meta["group"], stats, flags))
-        if (meta.get("group") == 3 and meta.get("mode") == "torque" and
+        rows.append((meta["case"], stats, flags))
+        if (meta.get("mode") == "torque" and
                 meta.get("case", "").startswith(("moving_", "coast_")) and
                 not flags.get("gaps") and len(table) > 2000):
             # Decimate to 200 Hz, smooth encoder speed, and differentiate over
             # 50 ms. Static breakaway samples must never enter this fit.
-            rpm = table[::100, 6].astype(float)
-            iq = table[::100, 7].astype(float)
+            rpm = table[::10, 10].astype(float)
+            iq = table[::10, 3].astype(float)
             smooth = np.convolve(rpm, np.ones(9) / 9, mode="same")
             omega = smooth[5:-5] * (math.pi / 30)
             domega = (smooth[10:] - smooth[:-10]) * (math.pi / 30) / .05
             current = iq[5:-5]
             ok = (np.isfinite(omega) & np.isfinite(domega) & np.isfinite(current) &
                   (np.abs(omega) > 25 * math.pi / 30) & (np.abs(omega) < 7000 * math.pi / 30))
-            bus = float(meta.get("bus_set_v", np.nanmedian(table[::100, 11])
+            bus = float(meta.get("bus_set_v", np.nanmedian(table[::10, 7])
                         if table.shape[1] > 11 else np.nan))
             mechanics.setdefault(bus, []).append((current[ok], omega[ok], domega[ok]))
         print(f"{name}: {stats['frames']} frames, {stats['seconds']} s")
     lines += ["## 连续性", "",
               "| 文件 | 帧数 | 秒 | 丢帧 | 最大间隔 us | 序号连续 | 故障帧 |",
               "|---|---|---|---|---|---|---|"]
-    for case, group, stats, flags in rows:
-        lines.append(f"| {case}_g{group} | {stats['frames']} | {stats['seconds']} | "
+    for case, stats, flags in rows:
+        lines.append(f"| {case} | {stats['frames']} | {stats['seconds']} | "
                      f"{flags.get('missing', '-')} | {flags.get('max_gap_us', '-')} | "
                      f"{flags.get('seq_ok', '-')} | {flags.get('faults', '-')} |")
-    lines += ["", "## 跟踪（仅组 3 有目标/机械通道）", "",
+    lines += ["", "## 跟踪", "",
               "| 文件 | rpm 均值 | rpm 标准差 | 位置误差峰 | 位置误差均值 | Iq 均值 |",
               "|---|---|---|---|---|---|"]
-    for case, group, stats, _ in rows:
+    for case, stats, _ in rows:
         if not stats.get("pos_tgt"):
             continue
         error = stats.get("pos_error") or {}
-        lines.append(f"| {case}_g{group} | {stats['rpm']['mean']:.1f} | "
+        lines.append(f"| {case} | {stats['rpm']['mean']:.1f} | "
                      f"{stats['rpm']['std']:.1f} | {error.get('max_abs', float('nan')):.2f} | "
                      f"{error.get('mean', float('nan')):.2f} | {stats['iq_ref']['mean']:.3f} |")
-    lines += ["", "## 空载运动模型", "", "仅使用组 3 的旋转中力矩和滑行段，|rpm| > 25；"
+    lines += ["", "## 空载运动模型", "", "仅使用旋转中力矩和滑行段，|rpm| > 25；"
               "速度平滑后以 50 ms 差分求加速度。系数次序为 Iq、ω、sgn(ω)、常数；"
               "单位依次为 A、rad/s、无量纲、rad/s²。静止起动数据未参与拟合。", ""]
     for bus, chunks in sorted(mechanics.items(), reverse=True):
@@ -763,34 +731,6 @@ def command_report(args):
     with open(target, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
     print(f"wrote {target}")
-    return 0
-
-
-def command_chain(args):
-    """Place independent repeats beside each other by capture-relative sample."""
-    files = sorted(f for f in os.listdir(args.directory)
-                   if f.startswith(args.case) and f.endswith((".zip", ".7z")))
-    if len(files) < 2:
-        raise SystemExit(f"need the same case on several groups, found {files}")
-    blocks = []
-    columns = ["capture_s"]
-    seen = set()
-    for name in files:
-        table, meta = bench.load(os.path.join(args.directory, name))
-        words = np.frombuffer(table[:, :12].tobytes(), dtype="<u4").reshape(-1, 12)
-        seq = (words[:, 1] & 0xFFFFFF).astype(np.int64)
-        group = int(words[0, 1] >> 24)
-        if group in seen or meta["continuity"]["gaps"]:
-            raise SystemExit(f"{name}: duplicate group or discontinuous capture")
-        seen.add(group)
-        blocks.append(np.column_stack((seq, table[:, 2:12])).astype(np.float64))
-        columns += [f"g{group}_seq"] + meta["columns"][2:12]
-    length = min(len(block) for block in blocks)
-    matrix = np.column_stack([np.arange(length) / bench.SAMPLE_HZ] + [block[:length] for block in blocks])
-    stem = os.path.join(args.directory, f"{args.case}_merged")
-    np.savetxt(stem + ".csv", matrix, delimiter=",", header=",".join(columns),
-               comments="", fmt="%.6g")
-    print(f"wrote {stem}.csv  ({matrix.shape[0]} rows x {matrix.shape[1]} columns); independent runs aligned by capture start only")
     return 0
 
 
@@ -850,7 +790,7 @@ def menu(args):
         if choice in ("1", "2"):
             mode = {"1": "speed", "2": "position"}[choice]
             print("1. 综合预设  2. 固定  3. 阶跃  4. 斜坡  5. 正弦  6. 方波  7. 三次曲线")
-            print("8. 特项列表（起动阈值/低速整圈/长行程等）  0. 返回")
+            print("8. 工况列表  0. 返回")
             kind = input("请选择工况：").strip()
             if kind == "0":
                 continue
@@ -868,12 +808,11 @@ def menu(args):
                     print(f"{index:2}. {experiment.case}：{experiment.note}")
                 selected = int(input("输入编号："))
                 args.case = available[selected - 1].case
-                args.include_long = True
             elif kind != "1":
                 print("无效选项")
                 continue
-            args.buses, args.groups, args.repeat = "24", "0,1,2,3,4,5,6,7", 1
-            print("使用默认方案：24 V、八组日志、每组一次；综合预设自动覆盖该模式全部档位。")
+            args.buses, args.repeat = "24", 1
+            print("使用默认方案：24 V、完整遥测；综合预设自动覆盖该模式全部档位。")
             try:
                 command_run(args)
             except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
@@ -915,7 +854,6 @@ def main():
     run.add_argument("--all", action="store_true", help="显式运行全量工况")
     run.add_argument("--case", help="仅运行指定工况名")
     run.add_argument("--buses", default="24", help="母线电压，如 24,18,12")
-    run.add_argument("--groups", default="0,1,2,3,4,5,6,7")
     run.add_argument("--repeat", type=int, default=1)
     run.add_argument("--iq-limit", type=float, default=DEFAULT_IQ_LIMIT, dest="iq_limit")
     run.add_argument("--rpm-limit", type=float, default=DEFAULT_RPM_LIMIT, dest="rpm_limit")
@@ -925,7 +863,6 @@ def main():
     run.add_argument("--stlink-sn")
     run.add_argument("--uart", help="CH340 监测串口，电机工况必须在线")
     run.add_argument("--psu", help="学生电源串口；off 表示不连接")
-    run.add_argument("--include-long", action="store_true", help="加入 60 圈位置专项")
     run.add_argument("--load-name", default="空载")
     run.add_argument("--load-mass-g", type=float)
     run.add_argument("--load-stl")
@@ -938,17 +875,12 @@ def main():
     report.add_argument("directory")
     report.set_defaults(func=command_report)
 
-    chain = sub.add_parser("chain", help="merge a case's groups into one CSV")
-    chain.add_argument("directory")
-    chain.add_argument("case")
-    chain.set_defaults(func=command_chain)
-
     args = parser.parse_args()
     if args.command is None:
-        return menu(argparse.Namespace(all=False, mode=None, case=None, buses="24", groups="0,1,2,3,4,5,6,7",
+        return menu(argparse.Namespace(all=False, mode=None, case=None, buses="24",
             repeat=1, iq_limit=DEFAULT_IQ_LIMIT, rpm_limit=DEFAULT_RPM_LIMIT,
             pos_limit=DEFAULT_POS_LIMIT, out=bench.DATA_ROOT, sn=None, stlink_sn=None,
-            uart=None, psu=None, include_long=False, dry_run=False, yes=False,
+            uart=None, psu=None, dry_run=False, yes=False,
             load_name="空载", load_mass_g=None, load_stl=None, load_axis=None))
     try:
         return args.func(args)

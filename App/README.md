@@ -1,12 +1,12 @@
 # 固件结构与使用
 
-当前功能：M1 20 kHz 有感 FOC，Id_ref=0，Iq 命令范围 ±5 A、10 A/s 参考斜坡；MT6835 角度换相，实测母线补偿，居中 SVPWM。当前 PI 标称带宽 600 Hz。在电流环之上新增 **1 kHz 速度环与位置环（基础 P+I）**，输出仍是 Iq 参考；USB 20 kHz 改为 **`send 0..7` 八组分组日志**。每次启动先关断校零；已有 Flash 电角度记录时保持待机。首次/显式 cal 的对齐电压仍 0.6 V。本次实现与实测详见本地 [电流内环报告](../build/foc_analysis/REPORT.md)，旧 [tests/FOC_TEST.md](../tests/FOC_TEST.md) 属于历史电压模式。
+当前功能：M1 20 kHz 有感 FOC，Id_ref=0，Iq 命令范围 ±5 A、10 A/s 参考斜坡；MT6835 角度换相，实测母线补偿，居中 SVPWM。当前 PI 标称带宽 600 Hz。在电流环之上为 1 kHz 速度环与位置环（基础 P+I），输出仍是 Iq 参考；USB 回传 2 kHz 控制记录。独立 FOC_CAPTURE 构建提供 20 kHz、2048 点本地原始采集。UART 安全状态帧保持 20 Hz。每次启动先关断校零；已有 Flash 电角度记录时保持待机。
 
 ## 模块
 
 | 位置 | 职责 |
 |---|---|
-| `Control/app.c` | 初始化、串口命令、UART 2 kHz 和 USB 20 kHz 分组回传 |
+| `Control/app.c` | 初始化、串口命令、UART 20 Hz 状态帧和 USB 2 kHz 完整遥测 |
 | `Control/control.c` | 1 kHz 速度环/位置环（串级），目标接收、多圈位置累积 |
 | `FOC/foc.c` | 零偏、ABC/dq、双 PI/抗饱和、预测角度、SVPWM、校准状态、Iq 斜坡 |
 | `Hardware/bsp/bsp_motor.c` | TIM8 功率输出、谷底更新/超时关断、校准 Flash |
@@ -16,22 +16,13 @@
 | `Hardware/bsp/bsp_can.c` | CAN1 非阻塞收发和接收队列 |
 | `Hardware/bsp/bsp_uart.c` | UART DMA 发送、接收队列 |
 | `Hardware/bsp/bsp_usb.*` | 原生 USB CDC、整帧异步发送队列、接收背压 |
-| `Protocols/JustFloat/justfloat.h` | JustFloat 帧封装（UART 2 kHz 仍用） |
+| `Protocols/JustFloat/justfloat.h` | UART JustFloat 帧封装工具 |
 
 应用和协议不依赖 HAL；硬件驱动不调用应用。`Core/Src/main.c` 只调用 `app_init()`，主循环处理命令/校准保存后休眠；`stm32f4xx_it.c` 连接各驱动和应用回调。自写代码只使用生成文件的 USER CODE 块，其他代码保持 CubeMX 所有权。
 
-USB 端口置 DTR 后，每个采样回调通过一次 `bsp_usb_write` 回传 **8 个小端 float32 + JustFloat 帧尾，共 36 字节**，1,040,000 B/s。下标 0 是打包时间戳/状态字，下标 1 是打包序号/组号，下标 2..11 由 `send X` 选定的日志组决定：
+USB 端口置 DTR 后，每 10 次采样回调发送一帧：15 个小端 float32 加 JustFloat 帧尾，共 64 字节、2 kHz（128,000 B/s）。下标 0 为打包微秒时间戳/状态/故障/功率字，下标 1 为 20 kHz 采样序号；下标 2..14 依次为 `Id`、`Iq`、`Iq_ref`、`Ud`、`Uq`、母线电压、编码器机械角、电角、实测/目标转速、实际/目标位置和模式。序号步长为 10，时间戳间隔为 500 µs。字段顺序和位打包见 [tools/bench/README.md](../tools/bench/README.md)。
 
-| 组 | 内容 |
-|---|---|
-| 0 | B/C/母线 ADC 原码、编码器原始/校正角、被本次 ADC 采样的 PWM 周期 CCR A/B/C、两相零偏 |
-| 1 | Ib/Ic、电角度、`iq_ref`、PI 积分器 `integral_d/q`、`ud/uq`、零偏 |
-| 2 | `ud/uq`、本周期生效的 CCR/占空比、采样窗口电压上限、`Vbus/√3` 线性上限 |
-| 3 | Iq 参考与实测值、多圈 `pos_deg`、目标位置、编码器 `rpm`、目标转速、控制模式 |
-
-通道表、位打包、时间/丢帧判据、分析配方见 [tools/bench/README.md](../tools/bench/README.md)。
-
-UART 封装接口为 `uart_justfloat`，仍是 2 kHz、15 float。USB 需要 PC 持续接收，溢出会锁存；命令经 USB 或 UART 前台解析，支持实际 CR、LF 或 CRLF，不混入文本回显。
+UART 状态帧保持 20 Hz、15 float、64 字节，供独立台架安全监测；不是高频波形流。USB 需要 PC 持续接收，溢出会锁存；命令经 USB 或 UART 前台解析，支持实际 CR、LF 或 CRLF，不混入文本回显。
 
 ## 控制模式
 
@@ -56,7 +47,7 @@ ADC1 rank1=PC3/IN13（B 相），ADC2 rank1=PC2/IN12（C 相）；rank2 均为 P
 1. ADC DMA 半传输中断启动 SPI DMA，与母线第二 rank 转换重叠。
 2. SPI3（Mode 3、10.5 MHz）由 DMA1 Stream5/Channel0 发送 6 字节，Stream0/Channel0 接收；CPU 不等待 SPI。
 3. SPI RX DMA 完成中断校验 CRC 和传感器状态，更新 `mt6835_angle_deg`，检查 ADC 两个 rank 已完成后发布三路电压，再调用 `app_sample()`。
-4. 回调执行 FOC，在下一谷底前写入三相预装载；每 10 次回调提交一帧，完成 ADC/控制及 CCR 提交后立即启动 UART TX DMA1 Stream6/Channel4，避免 SysTick 启动相位漂移影响采样。
+4. 回调执行 FOC，在下一谷底前写入三相预装载；USB 每 10 次回调入队一帧，UART 每 1000 次回调入队状态帧。UART TX DMA1 Stream6/Channel4 在控制及 CCR 提交后启动。
 
 ADC 硬件转换及数据搬运不占 CPU 指令时间；电压换算、SPI 启动、CRC 解码仍需 CPU，不能称为零开销。ADC/SPI DMA IRQ 同为优先级 1；TIM8 更新、ADC 错误和 USART2 RX 为优先级 0。2 Mbps RX 每 5 us 一个字节，必须能够抢占 FOC 数学计算。
 
@@ -72,7 +63,9 @@ ADC 硬件转换及数据搬运不占 CPU 指令时间；电压换算、SPI 启�
 
 USART2：PA2 TX / PA3 RX，**2000000 baud、8N1、无流控**。当前转换器 COM14 在 3.5 Mbps 下发送到 MCU 存在 RX 错误，2 Mbps 双向已验证。
 
-当前应用以 2 kHz 发送 15 个小端 float32：`Id A、Iq A、B采样电压V、C采样电压V、采样序号、RPM、母线V、Iq参考A、电角度°、Ud V、Uq V、已生效占空比A/B/C、状态字`，随后 `00 00 80 7F`，共 64 字节，含 8N1 开销占 2 Mbps 的 64%。序号为 24 位整数，每帧增加 10；状态字转整数后，低 3 位为状态、随后 4 位为故障、随后 2 位为功率模式。
+当前 UART 安全帧以 20 Hz 发送 15 个小端 float32：`Id A、Iq A、B采样电压V、C采样电压V、采样序号、RPM、母线V、Iq参考A、电角度°、Ud V、Uq V、已生效占空比A/B/C、状态字`，随后 `00 00 80 7F`，共 64 字节。序号为 24 位整数，每帧增加 1000；状态字转整数后，低 3 位为状态、随后 4 位为故障、bit7 为 PWM 已开启。
+
+`-DFOC_CAPTURE=ON` 独立构建支持 `capture`/`dump`：本地保存最多 2048 条 48-byte 记录（约 102 ms，96 KiB），采满后关断，停机后经 UART 导出。字段为 ADC B/C/母线原码、ADC 计数、采样 CCR、状态、编码器角度、电流和 Ud/Uq；可用 `python tools/bench/foc_capture.py output.foc3` 下载二进制并生成 CSV。普通 Release 不含该缓冲。
 
 命令支持整数或最多两位小数，拒绝非法格式/非有限值/越界：
 
@@ -83,7 +76,6 @@ USART2：PA2 TX / PA3 RX，**2000000 baud、8N1、无流控**。当前转换器 
 | `pos 720.00` | ±1e6° | Position 模式目标，绝对多圈机械角度 |
 | `motion 7000 50000 500000` | 速度/加速度/跃度 | 设置后续位置 S 曲线约束，不启动电机 |
 | `zero` | — | 把当前位置定义为 0°，需停机且静止 |
-| `send 0`..`send 7` | — | 切换 20 kHz 日志组，纯日志开关 |
 | `stop` | — | 立即关断，取消斜坡与外环 |
 | `clear` | — | 仅清已消失故障，不自启 |
 | `cal` | — | 仅静止待机重校准 |
@@ -121,11 +113,9 @@ Debug/Release 与主机命令、角度、母线、采样窗口及 2 kHz 分频�
 
 四档运行链路最大 3411 cycles=20.304 us，包含 SPI 等待与遥测，非纯 CPU 占用；600 ticks 写 CCR 截止保护保持原值。最终普通 Release 重烧后被动 10 s 收到 19993 帧、相邻序号全差 10、故障/ADC/磁编/UART 错误为 0，GPIO 六路低、校准 Flash 记录保留。当前构建最后停机逻辑修正只做了主机与停机上板回归，四档加压为修正前相同控制算法结果。
 
-独立 `-DFOC_CAPTURE=ON` 构建支持 capture/dump，2048 条 32-byte 记录、满后关断，停止后导出；普通 Release 不含此 64 KiB 缓冲。新工具是本地 `build/foc_analysis/current_serial.py`（默认 stop 后被动接收），旧测试脚本属于历史 API/协议，不能混用。
-
 ## 电流采样专项核验（2026-09-20，后续于上述历史记录）
 
-本轮报告及连续原始记录在 `../build/current_audit/REPORT.md`。正常协议仍为 2 kHz、14 float；只调整 TX 启动相位，保持 20 kHz 控制、300 Hz PI、±0.8 A 指令和保护阈值。CCR4 对比后仍选 4100，窗口限幅同时约束前后沿。
+本轮报告及连续原始记录在 `../build/current_audit/REPORT.md`。该历史版本协议为 2 kHz、14 float；只调整 TX 启动相位，保持 20 kHz 控制、300 Hz PI、±0.8 A 指令和保护阈值。CCR4 对比后仍选 4100，窗口限幅同时约束前后沿。
 
 独立 Capture 构建改为 FOC2：8 字节头（FOC2 和 uint32 条数），每条 36 字节 `<I8H4f>`：序号、B/C/母线 raw、ADC-read 入口 CNT、已生效三相 CCR、flags、机械角度、采样电角度、Id、Iq。flags 位 0～2 为状态、3～6 为故障、7～8 为采样功率模式、9 为窗口有效；CNT 不是采样保持结束时间。2048 条共 72 KiB，普通 Release 不包含。
 
@@ -146,7 +136,7 @@ Debug/Release 与主机命令、角度、母线、采样窗口及 2 kHz 分频�
 
 ## 本轮窗口修正与电流响应迭代（2026-09-21）
 
-当前 PI 标称带宽600 Hz（Kp=0.18849556 V/A，KiTs=0.02261947 V/A），采样/控制仍20 kHz，普通遥测仍14 float、2 kHz。运行参考不再有1 A/s斜坡；首次上电对齐仍为0.6 V并保留校准斜坡。ADC孔径28 cycles、CCR4=4100和500 ns死区未缩短。
+该历史版本 PI 标称带宽600 Hz（Kp=0.18849556 V/A，KiTs=0.02261947 V/A），采样/控制仍20 kHz，普通遥测当时为14 float、2 kHz。运行参考不再有1 A/s斜坡；首次上电对齐仍为0.6 V并保留校准斜坡。ADC孔径28 cycles、CCR4=4100和500 ns死区未缩短。
 
 `motor_write_min` 为写CCR入口最小CNT，要求至少600 ticks；`motor_timing_fault`低字节分别为1提交、2谷底更新、3采样周期，高位记录当时CNT或间隔。它们用于定位超时，不改变截止条件。
 

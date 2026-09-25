@@ -1,9 +1,8 @@
 """Host side of the 405_FOC bench data system.
 
-One USB frame is 8 little-endian float32 plus the JustFloat terminator
-``00 00 80 7F``, 36 bytes total, sent at 20 kHz. Channels 0 and 1 are packed
-header words; the six remaining channels depend on the logging group selected
-with ``send X``. See README.md for the per-group channel map.
+One USB frame is 15 little-endian float32 plus the JustFloat terminator
+``00 00 80 7F``, 64 bytes total, sent at 2 kHz. Channels 0 and 1 are packed
+header words; channels 2..14 are the compact control record.
 """
 import argparse
 import json
@@ -21,42 +20,28 @@ import numpy as np
 import serial
 from serial.tools import list_ports
 
-FRAME_BYTES = 36
-CHANNELS = 8
+FRAME_BYTES = 64
+CHANNELS = 15
+CHANNEL_COUNT = CHANNELS
 TERMINATOR = b"\x00\x00\x80\x7f"
-SAMPLE_HZ = 20000.0
-SAMPLE_US = 50
+SAMPLE_HZ = 2000.0
+SAMPLE_US = 500
+SAMPLE_SEQ_STEP = 10
 T_24_MASK = 0xFFFFFF
 SERIAL_SPEED = 2000000
 USB_VID_PID = (0x0483, 0x5740)
 DATA_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "data"))
 SEVEN_ZIP = shutil.which("7z") or r"C:\Program Files\7-Zip\7z.exe"
 
-# Channels 2..7 per logging group, exactly as App/Control/app.c fills them.
-GROUP_CHANNELS = {
-    0: ["adc_raw_b", "adc_raw_c", "adc_raw_bus", "angle_raw_deg", "angle_deg", "sampled_ccr_a"],
-    1: ["sampled_ccr_b", "sampled_ccr_c", "b_offset", "c_offset", "b_voltage", "c_voltage"],
-    2: ["ib", "ic", "elec_deg", "iq_ref", "integral_d", "integral_q"],
-    3: ["iq_ref", "rpm_tgt", "pos_deg", "pos_tgt", "rpm", "rpm_encoder"],
-    4: ["ud", "uq", "ccr_a", "ccr_b", "ccr_c", "duty_a"],
-    5: ["duty_b", "duty_c", "edge_limit_v", "vec_limit_v", "rpm_tgt", "iq"],
-    6: ["ud", "uq", "b_offset", "c_offset", "id", "iq"],
-    7: ["rpm_tgt", "iq", "mode", "bus_v", "pos_tgt", "pos_deg"],
-}
-CHANNEL_COUNT = 8
+CHANNEL_NAMES = ["id_a", "iq_a", "iq_ref_a", "ud_v", "uq_v", "bus_v", "mech_deg",
+                 "elec_deg", "rpm", "rpm_tgt", "pos_deg", "pos_tgt", "mode"]
+COLUMNS = ["t_us", "seq", *CHANNEL_NAMES]
 
-
-
-def _columns(group):
-    """Matrix column names: header, then this group's six live channels."""
-    names = ["t_us", "seq"] + [f"g{group}_{n}" for n in GROUP_CHANNELS[group]]
-    return names + [f"unused{n}" for n in range(len(names), CHANNEL_COUNT)]
-
-
-COLUMNS = {group: _columns(group) for group in GROUP_CHANNELS}
-
-GROUP_NAMES = {0: "raw", 1: "current", 2: "voltage", 3: "control",
-               4: "vector", 5: "limit", 6: "current_loop", 7: "state"}
+FOC3_HEADER = struct.Struct("<II")
+FOC3_RECORD = struct.Struct("<I8H7f")
+FOC3_FIELDS = ["seq", "adc_b", "adc_c", "adc_bus", "adc_counter", "ccr_a", "ccr_b",
+               "ccr_c", "flags", "mech_deg", "elec_deg", "id_a", "iq_a", "iq_ref_a",
+               "ud_v", "uq_v"]
 
 # FOC state machine and fault codes, App/FOC/foc.h.
 STATE_NAMES = ["IDLE", "PRECHARGE", "CALIBRATE", "SAVE", "RUN", "FAULT", "OFFSET"]
@@ -75,7 +60,7 @@ CURRENT_PER_VOLT = 50.0
 class Frame:
     """Decoded header words of a single frame."""
 
-    __slots__ = ("time_us", "state", "fault", "power", "seq", "group", "body")
+    __slots__ = ("time_us", "state", "fault", "power", "seq", "body")
 
     def __init__(self, body):
         word0, word1 = struct.unpack_from("<II", body)
@@ -84,15 +69,14 @@ class Frame:
         self.fault = word0 >> 27 & 0xF
         self.power = word0 >> 31 & 0x1
         self.seq = word1 & T_24_MASK
-        self.group = word1 >> 24 & 0xFF
         self.body = body
 
     def channel(self, index):
-        """Channel value by its index inside the 8-float frame."""
+        """Channel value by its index inside the 15-float frame."""
         return struct.unpack_from("<f", self.body, index * 4)[0]
 
     def __repr__(self):
-        return (f"Frame(t={self.time_us} seq={self.seq} group={self.group} "
+        return (f"Frame(t={self.time_us} seq={self.seq} "
                 f"state={STATE_NAMES[self.state]} fault={FAULT_NAMES[self.fault]})")
 
 
@@ -162,13 +146,13 @@ def parse_file(path):
         dropped = len(raw) - usable
     else:
         # A damaged USB transfer can remove bytes inside one frame. Recover
-        # later complete frames by their terminator and group, then let the
+        # later complete frames by their terminator and fixed header byte, then let the
         # sequence/timestamp checks report the missing sample.
         mark = TERMINATOR_WORDS
         ends = np.flatnonzero((raw[:-3] == mark[0]) & (raw[1:-2] == mark[1]) &
                                (raw[2:-1] == mark[2]) & (raw[3:] == mark[3]))
         starts = ends[ends >= CHANNELS * 4] - CHANNELS * 4
-        starts = starts[raw[starts + 7] == raw[offset + 7]]
+        starts = starts[raw[starts + 7] == 0]
         if len(starts) < 2:
             raise ValueError(f"{path}: no recoverable frames")
         body = raw[starts[:, None] + np.arange(CHANNELS * 4)]
@@ -181,15 +165,14 @@ def parse_file(path):
     return table, dropped, words
 
 
-def continuity(words, group):
-    """Gap, sequence and status statistics for a single-group capture."""
+def continuity(words):
+    """Gap, sequence and status statistics for the telemetry stream."""
     time_us = (words[:, 0] & T_24_MASK).astype(np.int64)
     seq = (words[:, 1] & T_24_MASK).astype(np.int64)
-    groups = words[:, 1] >> 24 & 0xFF
     status = words[:, 0] >> 24 & 0xFF
     stats = {
         "frames": int(len(words)),
-        "group_mismatch": int(np.count_nonzero(groups != group)),
+        "header_errors": int(np.count_nonzero(words[:, 1] >> 24)),
         "faults": int(np.count_nonzero(status >> 3 & 0xF)),
         "max_state": int(np.max(status & 0x7)) if len(words) else 0,
     }
@@ -198,13 +181,29 @@ def continuity(words, group):
         return stats
     dt = (np.diff(time_us)) & T_24_MASK
     dseq = (np.diff(seq)) & T_24_MASK
-    stats["gaps"] = int(np.count_nonzero((dt < 45) | (dt > 55) | (dseq != 1)))
+    stats["gaps"] = int(np.count_nonzero((dt < 450) | (dt > 550) | (dseq != SAMPLE_SEQ_STEP)))
     stats["timestamp_jitter"] = int(np.count_nonzero(dt != SAMPLE_US))
     stats["max_gap_us"] = int(dt.max())
-    stats["missing"] = int(np.sum(dseq - 1))
-    stats["seq_ok"] = bool(np.all(dseq == 1))
+    stats["missing"] = int(np.sum(np.maximum(dseq // SAMPLE_SEQ_STEP - 1, 0)))
+    stats["seq_ok"] = bool(np.all(dseq == SAMPLE_SEQ_STEP))
     stats["dt_ok"] = bool(stats["gaps"] == 0)
     return stats
+
+
+def parse_foc_capture(path):
+    """Decode the stopped 20 kHz FOC3 SRAM dump."""
+    raw = open(path, "rb").read()
+    if len(raw) < FOC3_HEADER.size:
+        raise ValueError("FOC3 capture is truncated")
+    magic, count = FOC3_HEADER.unpack_from(raw)
+    if magic != 0x33434F46 or not 0 < count <= 2048 or len(raw) != FOC3_HEADER.size + count * FOC3_RECORD.size:
+        raise ValueError("invalid FOC3 capture size or header")
+    rows = [FOC3_RECORD.unpack_from(raw, FOC3_HEADER.size + n * FOC3_RECORD.size)
+            for n in range(count)]
+    if any(((current[0] - previous[0]) & T_24_MASK) != 1
+           for previous, current in zip(rows, rows[1:])):
+        raise ValueError("FOC3 capture sequence gap")
+    return rows
 
 
 def find_port(serial_number=None):
@@ -224,8 +223,8 @@ def find_port(serial_number=None):
 class Link:
     """Serial link with a reader thread that only appends bytes to a file.
 
-    Parsing during capture is deliberately avoided: at 1.04 MB/s any per-frame
-    Python work would stall the host and break the 20 kHz record.
+    Parsing during capture is deliberately avoided to keep host scheduling out
+    of the USB acquisition path.
     """
 
     def __init__(self, port, sn=None, timeout=0.05):
@@ -380,7 +379,6 @@ def wait_idle(link, timeout=8.0, threshold=20.0):
                     raise RuntimeError("USB telemetry stopped after reopening the session")
                 link.close_session()
                 link.open_session()
-                link.send("send 3")
                 link.send("stop")
                 seen_at = time.monotonic()
                 reopened = True
@@ -389,12 +387,11 @@ def wait_idle(link, timeout=8.0, threshold=20.0):
         last = frames[-1]
         if last.fault:
             raise RuntimeError(f"motor fault {FAULT_NAMES[last.fault]} while waiting for idle")
-        if last.group == 3 and last.state == 0 and abs(last.channel(7)) < threshold:
+        if last.state == 0 and abs(last.channel(10)) < threshold:
             return True
     if last is None:
         raise RuntimeError("USB telemetry stopped while waiting for idle")
-    raise RuntimeError(f"idle timeout: group={last.group} state={STATE_NAMES[last.state]} "
-                       f"rpm={last.channel(7) if last.group == 3 else 'unavailable'}")
+    raise RuntimeError(f"idle timeout: state={STATE_NAMES[last.state]} rpm={last.channel(10)}")
 
 
 def archive(source, target, meta, verify=True):
@@ -443,37 +440,27 @@ def load(path):
         table, dropped, words = parse_file(raw)
     meta["parsed_frames"] = int(len(table))
     meta["dropped_tail_bytes"] = int(dropped)
-    meta["continuity"] = continuity(words, meta["group"]) if len(words) else {}
-    meta["columns"] = meta.get("columns", COLUMNS[meta["group"]])
+    meta["continuity"] = continuity(words) if len(words) else {}
+    meta["columns"] = meta.get("columns", COLUMNS)
     return table, meta
 
 
 def summarise(table, meta):
     """Per-case metrics from the reference and ground-truth channels."""
-    group = meta["group"]
-    stats = {
-        "frames": int(table.shape[0]),
-        "seconds": round(table.shape[0] / SAMPLE_HZ, 3),
-        "group": group,
-        "group_name": GROUP_NAMES[group],
-    }
-    if group != 3:
-        stats["note"] = ("raw/current/voltage carry non-reconstructible physics; "
-                         "tracking metrics need group 3")
-        return stats
+    stats = {"frames": int(table.shape[0]), "seconds": round(table.shape[0] / SAMPLE_HZ, 3)}
     index = {name: position for position, name in enumerate(meta["columns"])}
-    for name in ("rpm", "rpm_tgt", "pos_deg", "pos_tgt", "iq_ref", "iq"):
-        if f"g{group}_{name}" not in index:
+    for name in ("rpm", "rpm_tgt", "pos_deg", "pos_tgt", "iq_a", "iq_ref_a"):
+        if name not in index:
             continue
-        values = table[:, index[f"g{group}_{name}"]].astype(np.float64)
+        values = table[:, index[name]].astype(np.float64)
         finite = values[np.isfinite(values)]
         stats[name] = ({
             "min": float(finite.min()), "max": float(finite.max()),
             "mean": float(finite.mean()), "std": float(finite.std()),
         } if finite.size else None)
     if stats.get("pos_tgt"):
-        error = table[:, index[f"g{group}_pos_tgt"]].astype(np.float64) \
-            - table[:, index[f"g{group}_pos_deg"]].astype(np.float64)
+        error = table[:, index["pos_tgt"]].astype(np.float64) \
+            - table[:, index["pos_deg"]].astype(np.float64)
         finite = error[np.isfinite(error)]
         stats["pos_error"] = ({"max_abs": float(np.abs(finite).max()),
                                "mean": float(finite.mean())} if finite.size else None)
@@ -504,7 +491,6 @@ def discover(seconds=1.5, sn=None):
     try:
         link.open_session()
         link.send("stop")
-        link.send("send 0")
         link.listen(0.1)
         link.start_capture(path)
         time.sleep(seconds)
@@ -526,7 +512,7 @@ def discover(seconds=1.5, sn=None):
     }
     result["layout_ok"] = dropped < FRAME_BYTES * 2
     if frames:
-        result["continuity"] = continuity(words, 0)
+        result["continuity"] = continuity(words)
     return result
 
 
@@ -535,6 +521,7 @@ def main():
     parser.add_argument("--list", action="store_true", help="enumerate serial ports")
     parser.add_argument("--discover", action="store_true", help="probe the FOC board")
     parser.add_argument("--parse", help="summarise one capture archive")
+    parser.add_argument("--parse-foc3", help="decode one stopped FOC3 SRAM dump")
     parser.add_argument("--sn", help="USB serial number, when several boards are present")
     args = parser.parse_args()
     if args.list:
@@ -546,6 +533,11 @@ def main():
     if args.parse:
         table, meta = load(args.parse)
         print(json.dumps(summarise(table, meta), indent=2, ensure_ascii=False))
+        return 0
+    if args.parse_foc3:
+        rows = parse_foc_capture(args.parse_foc3)
+        print(json.dumps({"records": len(rows), "duration_us": max(0, len(rows) - 1) * 50,
+                          "record_bytes": FOC3_RECORD.size}, indent=2))
         return 0
     parser.print_help()
     return 2
