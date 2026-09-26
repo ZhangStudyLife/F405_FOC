@@ -189,6 +189,6 @@ void control_step(uint32_t sample_us, float mechanical_deg)
     float dt = (float)elapsed * 1e-6f;
     previous_tick = sample_us;
     speed = foc.rpm;
-    if (!commanded || mode == CONTROL_TORQUE) return; /* Torque keeps its own Iq reference. */
+    if (foc.state != FOC_RUN || !commanded || mode == CONTROL_TORQUE) return;
     reference = outer_output(dt);
 }

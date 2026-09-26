@@ -189,7 +189,25 @@ int main(void)
     /* `hello` answers on UART only, so the binary USB stream stays framed. */
     unsigned before = app_command_rejected;
     assert(app_command("hello") && app_command_rejected == before);
-    puts("PASS: 15-float 2 kHz USB layout, status word, rpm/pos/zero parsing,"
+    /* Coast after stop: USB speed/position must keep following the encoder. */
+    usb("rpm 250\r");
+    for (unsigned n = 0; n < 2000u; ++n) {
+        mt6835_angle_deg = fmodf(mt6835_angle_deg + 0.075f, 360.0f);
+        motor_sample_us = (motor_sample_us + 50u) & 0xffffffu;
+        app_sample();
+    }
+    assert(channel(10) > 200.0f);
+    usb("stop\r");
+    float coast_position = control_position_deg();
+    for (unsigned n = 0; n < 6000u; ++n) {
+        if (n < 2000u) mt6835_angle_deg = fmodf(mt6835_angle_deg + 0.03f, 360.0f);
+        motor_sample_us = (motor_sample_us + 50u) & 0xffffffu;
+        app_sample();
+        assert(foc.state == FOC_IDLE && motor_mode == MOTOR_OFF && foc.iq_ref == 0.0f);
+    }
+    assert(fabsf(channel(10)) < 1.0f);
+    assert(control_position_deg() - coast_position > 50.0f);
+    puts("PASS: idle coast speed/position, 15-float 2 kHz USB layout, status word, rpm/pos/zero parsing,"
          " 20k frames, 10 A/s ramp, motion parsing, outer-loop reference selection");
     return 0;
 }

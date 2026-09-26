@@ -261,5 +261,5 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
 
 void foc_outer_step(void)
 {
-    if (foc.state == FOC_RUN) control_step(motor_sample_us, position);
+    control_step(motor_sample_us, position);
 }
