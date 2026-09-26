@@ -14,7 +14,7 @@ rem  get garbled and can break the script body.
 rem ============================================================
 chcp 65001 >nul
 set PYTHONUTF8=1
-python "%~dp0..\tools\bench\bench.py" %*
+python "%~dp0tools\bench\bench.py" %*
 set "result=%errorlevel%"
 if not "%result%"=="0" pause
 if "%~1"=="" pause
