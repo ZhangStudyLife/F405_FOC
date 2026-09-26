@@ -55,7 +55,48 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "有效遥测"):
                 bench.recover(old, None, supply, SimpleNamespace(sn="test"), 24, "USB timeout")
             reset.assert_called_once()
-            supply.output.assert_called_once_with(False)
+            self.assertTrue(all(call.args == (False,) for call in supply.output.call_args_list))
+
+    def test_state_failure_escalates_to_reset_with_power_off(self):
+        old, fresh, supply = Mock(), Mock(), Mock()
+        supply.state.protection_status = 0
+        fresh.listen.return_value = [SimpleNamespace(fault=0)]
+        def reset(args):
+            self.assertEqual(supply.output.call_args.args, (False,))
+        with patch.object(bench.bench, "find_port", return_value=SimpleNamespace(device="test", serial_number="test")), \
+             patch.object(bench.bench, "Link", return_value=fresh), \
+             patch.object(bench.bench, "wait_idle", side_effect=[RuntimeError("idle timeout"), True]) as idle, \
+             patch.object(bench.time, "sleep"), \
+             patch.object(bench, "reset_board", side_effect=reset) as reboot:
+            self.assertIs(bench.recover(old, None, supply, SimpleNamespace(sn="test"), 24, "stuck state"), fresh)
+            reboot.assert_called_once()
+            self.assertEqual(idle.call_count, 2)
+
+    def test_persistent_fault_stops_after_one_reset(self):
+        old, fresh, supply = Mock(), Mock(), Mock()
+        supply.state.protection_status = 0
+        fresh.listen.return_value = [SimpleNamespace(fault=8)]
+        with patch.object(bench.bench, "find_port", return_value=SimpleNamespace(device="test", serial_number="test")), \
+             patch.object(bench.bench, "Link", return_value=fresh), \
+             patch.object(bench.bench, "wait_idle", side_effect=RuntimeError("persistent fault")), \
+             patch.object(bench.time, "sleep"), patch.object(bench, "reset_board") as reset:
+            with self.assertRaisesRegex(RuntimeError, "persistent fault"):
+                bench.recover(old, None, supply, SimpleNamespace(sn="test"), 24, "fault")
+            reset.assert_called_once()
+            self.assertEqual(supply.output.call_args.args, (False,))
+
+    def test_failed_power_off_prevents_reset(self):
+        old, fresh, supply = Mock(), Mock(), Mock()
+        supply.state.protection_status = 0
+        supply.output.side_effect = [None, None, RuntimeError("power off failed")]
+        fresh.listen.return_value = [SimpleNamespace(fault=0)]
+        with patch.object(bench.bench, "find_port", return_value=SimpleNamespace(device="test", serial_number="test")), \
+             patch.object(bench.bench, "Link", return_value=fresh), \
+             patch.object(bench.bench, "wait_idle", side_effect=RuntimeError("idle timeout")), \
+             patch.object(bench.time, "sleep"), patch.object(bench, "reset_board") as reset:
+            with self.assertRaisesRegex(RuntimeError, "power off failed"):
+                bench.recover(old, None, supply, SimpleNamespace(sn="test"), 24, "fault")
+            reset.assert_not_called()
 
     def test_supply_requires_fresh_full_status_and_output(self):
         supply = devices.StudentPower.__new__(devices.StudentPower)

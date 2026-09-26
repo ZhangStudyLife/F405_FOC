@@ -446,56 +446,51 @@ def recover(link, monitor, supply, args, voltage, error):
     if link:
         link.close()
     fresh = None
-    try:
-        for reset in (False, True):
+    for reset in (False, True):
+        try:
             if reset:
                 if not supply:
                     raise RuntimeError("不能核实功率断电，禁止自动 ST-Link 复位")
                 reset_board(args)
-            try:
-                port = bench.find_port(args.sn)
-                fresh = bench.Link(port.device, port.serial_number)
-                fresh.open_session()
-                fresh.send("stop")
-                frames = fresh.listen(.6)
-                if not frames:
-                    raise RuntimeError("重连后没有有效遥测")
-                fresh.close_session()
-                break
-            except (OSError, RuntimeError):
-                if fresh:
-                    fresh.close()
-                    fresh = None
-                if reset:
-                    raise
-        if supply:
-            supply.configure(voltage, 5.0)
-            supply.output(True)
-            time.sleep(.5)
-            supply.health()
-        # Clear requires a valid bus. Clearing while the supply is off is rejected.
-        fresh.open_session()
-        frames = fresh.listen(.2)
-        if not frames:
-            raise RuntimeError("恢复母线后 USB 无反馈")
-        if frames[-1].fault:
-            print(f"恢复检查：{bench.FAULT_NAMES[frames[-1].fault]}，尝试一次 clear")
-            fresh.send("clear")
-        bench.wait_idle(fresh, threshold=5.0)
-        fresh.close_session()
-        if monitor:
-            if not monitor.running:
-                port = monitor.port.port
-                monitor.close()
-                monitor.__init__(port)
-                time.sleep(.2)
-            monitor.health()
-        print("恢复自检通过：有新帧、无故障、转子静止；重跑当前段")
-        return fresh
-    except Exception:
-        if fresh:
-            fresh.close()
-        raise
+            port = bench.find_port(args.sn)
+            fresh = bench.Link(port.device, port.serial_number)
+            fresh.open_session()
+            fresh.send("stop")
+            if not fresh.listen(.6):
+                raise RuntimeError("重连后没有有效遥测")
+            fresh.close_session()
+            if supply:
+                supply.configure(voltage, 5.0)
+                supply.output(True)
+                time.sleep(.5)
+                supply.health()
+            fresh.open_session()
+            frames = fresh.listen(.2)
+            if not frames:
+                raise RuntimeError("恢复母线后 USB 无反馈")
+            if frames[-1].fault:
+                print(f"恢复检查：{bench.FAULT_NAMES[frames[-1].fault]}，尝试一次 clear")
+                fresh.send("clear")
+            bench.wait_idle(fresh, threshold=5.0)
+            fresh.close_session()
+            if monitor:
+                if not monitor.running:
+                    monitor.close()
+                    monitor.__init__(monitor.port.port)
+                    time.sleep(.2)
+                monitor.health()
+            print("恢复自检通过：有新帧、无故障、转子静止；重跑当前段")
+            return fresh
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            if fresh:
+                fresh.close()
+                fresh = None
+            if supply:
+                supply.output(False)
+                supply.health(require_output=False)
+            if reset:
+                raise
+            print("软件恢复未通过，断电后尝试一次 ST-Link 完整复位")
 
 
 def command_run(args):
@@ -612,8 +607,7 @@ def command_run(args):
                         save()
                         if attempt:
                             failed = True
-                            print(f"本段重试仍失败，已保存残段（{exc}）；跳过本段继续后续工况")
-                            break
+                            raise RuntimeError(f"本段恢复后仍失败，已保存残段并停止：{exc}") from exc
                         link = recover(link, monitor, supply, args, voltage, exc)
                 save()
     except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
