@@ -1,0 +1,54 @@
+{
+  "usb": {
+    "state": 0,
+    "fault": 0,
+    "power": 0,
+    "rpm": -7.006492321624085e-44
+  },
+  "uart": {
+    "host_ns": 63252421000000,
+    "seq": 12851000,
+    "rpm": -7.006492321624085e-44,
+    "bus_v": 4.406739711761475,
+    "iq_ref": 0.0,
+    "state": 0,
+    "fault": 0
+  },
+  "power": {
+    "input_voltage": 32.260501861572266,
+    "set_voltage": 12.0,
+    "set_current": 5.0,
+    "output_voltage": 4.388658046722412,
+    "output_current": 0.0,
+    "output_power": 0.0,
+    "temperature": 33.57398223876953,
+    "capacity_ah": 0.07999075949192047,
+    "energy_wh": 1.5177563428878784,
+    "output_enabled": false,
+    "protection_status": 0,
+    "regulation_mode": 1,
+    "address": 1,
+    "brightness": 14,
+    "metering_enabled": true,
+    "model": "DPS-150",
+    "serial_number": "V1.0",
+    "firmware": "",
+    "max_voltage": 32.06050109863281,
+    "max_current": 5.099999904632568,
+    "protections": {
+      "ovp": 31.0,
+      "ocp": 5.099999904632568,
+      "opp": 150.0,
+      "otp": 80.0,
+      "lvp": 5.0
+    },
+    "protection_limits": {
+      "ovp": 30.0,
+      "ocp": 5.099999904632568,
+      "opp": 150.0,
+      "otp": 99.0,
+      "lvp": 30.0
+    }
+  },
+  "sha256": "25354d0485ad6bda4b4989d09348a42969395529b63d6e6ec30bf7ddc5329d3c"
+}
