@@ -62,12 +62,7 @@ void control_step(uint32_t sample_us, float mechanical_deg)
     float limited = fmaxf(-FOC_CURRENT_MAX, fminf(FOC_CURRENT_MAX, wanted));
     /* Speed/position use encoder-positive coordinates; Iq uses phase order. */
     control.iq_ref = (float)foc.calibration.direction * limited;
-    float applied = (float)foc.calibration.direction * foc.iq_ref;
-    /* Do not wind up while the current ramp is still catching the PI output.
-       Always allow integration that releases an existing limit. */
-    if (error * (wanted - applied) <= 0.0f ||
-        fabsf(wanted - applied) <= motor_params.current_ramp * (float)elapsed * 1e-6f)
-        integral += motor_params.speed_ki * error * ((float)elapsed * 1e-6f);
+    integral += motor_params.speed_ki * error * ((float)elapsed * 1e-6f);
     integral += 0.1f * (limited - wanted);
     integral = fmaxf(-FOC_CURRENT_MAX, fminf(FOC_CURRENT_MAX, integral));
 }

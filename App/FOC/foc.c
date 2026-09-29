@@ -203,13 +203,15 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         foc.state = aligning ? FOC_CALIBRATE : FOC_RUN;
     }
     if (foc.state == FOC_RUN) {
-        /* Slew the applied reference in every mode at the 20 kHz rate. */
-        float target = control.mode != CONTROL_TORQUE && control.active ? control.iq_ref : foc.command;
-        float step = target - foc.iq_ref;
-        float ramp = motor_params.current_ramp * 5e-5f;
-        if (step > ramp) step = ramp;
-        else if (step < -ramp) step = -ramp;
-        foc.iq_ref += step;
+        /* The speed PI must retain fast torque correction; slew torque commands only. */
+        if (control.active && control.mode != CONTROL_TORQUE) foc.iq_ref = control.iq_ref;
+        else {
+            float step = foc.command - foc.iq_ref;
+            float ramp = motor_params.current_ramp * 5e-5f;
+            if (step > ramp) step = ramp;
+            else if (step < -ramp) step = -ramp;
+            foc.iq_ref += step;
+        }
         /* A stalled speed loop must not hold the rotor at its current limit. */
         if (control.active && control.mode == CONTROL_SPEED && fabsf(control.speed_target) >= 5.0f &&
             fabsf(foc.rpm) < 5.0f && fabsf(foc.iq_ref) >= 0.9f * FOC_CURRENT_MAX) {
