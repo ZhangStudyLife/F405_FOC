@@ -69,17 +69,15 @@ void mt6835_start(void)
        large positive float through unsigned arithmetic or memory corruption. */
     uint32_t counter = TIM8->CNT & 0xffffu;
     mt6835_last_counter = counter;
-    if (counter > 8400u) {
+    if (counter > 4200u) {
         mt6835_sample_delay = NAN;
         mt6835_timing_fault = 1u;
         if (!mt6835_first_error) mt6835_first_error = 3u;
         mt6835_errors++;
         return;
     }
-    uint32_t ticks = (TIM8->CR1 & TIM_CR1_DIR)
-        ? (counter > FOC_HOLD_TICKS ? counter - FOC_HOLD_TICKS : 0u)
-        : (8400u - counter > FOC_HOLD_TICKS ? 8400u - counter - FOC_HOLD_TICKS : 0u);
-    mt6835_sample_delay = (float)ticks / 168e6f;
+    uint32_t ticks = (TIM8->CR1 & TIM_CR1_DIR) ? 8400u - counter : counter;
+    mt6835_sample_delay = (float)(ticks > FOC_HOLD_TICKS ? ticks - FOC_HOLD_TICKS : 0u) / 168e6f;
     GPIOA->BSRR = GPIO_PIN_0 << 16;
     DMA1_Stream0->CR |= DMA_SxCR_EN;
     DMA1_Stream5->CR |= DMA_SxCR_EN;

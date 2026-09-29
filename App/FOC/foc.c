@@ -8,9 +8,10 @@
 #define PI 3.14159265358979323846f
 #define TURN (2.0f * PI)
 foc_t foc;
+float foc_fault[9];
 static float previous, position, origin, forward, sum_sin, sum_cos, low, high;
 static uint32_t ticks;
-static float integral_d, integral_q, variance_b, variance_c, previous_command;
+static float integral_d, integral_q, variance_b, variance_c;
 static bool tracking, aligning;
 
 static void sincos_fast(float theta, float *s, float *c)
@@ -73,7 +74,6 @@ void foc_stop(void)
     foc.command = foc.iq_ref = foc.ud = foc.uq = 0.0f;
     integral_d = integral_q = 0.0f;
     aligning = false;
-    previous_command = 0.0f; /* Cancel any in-flight command ramp. */
     foc.duty[0] = foc.duty[1] = foc.duty[2] = 0.0f;
     control_stop();
     if (foc.state != FOC_FAULT) foc.state = foc.zero_ready ? FOC_IDLE : FOC_OFFSET;
@@ -81,8 +81,13 @@ void foc_stop(void)
 
 void foc_trip(uint32_t fault)
 {
-    if (foc.state != FOC_FAULT) foc.fault = fault;
-    foc.state = FOC_FAULT;
+    if (foc.state != FOC_FAULT) {
+        foc.fault = fault;
+        foc.state = FOC_FAULT;
+        float sample[] = {foc.id, foc.iq, foc.iq_ref, foc.ud, foc.uq, foc.rpm, foc.angle_step,
+                          (float)(motor_timing_fault & 255u), (float)(motor_timing_fault >> 8)};
+        memcpy(foc_fault, sample, sizeof sample);
+    }
     foc_stop();
 }
 
@@ -90,6 +95,7 @@ bool foc_calibrate(void)
 {
     if (foc.state != FOC_IDLE || !foc.zero_ready || fabsf(foc.rpm) >= 5.0f) return false;
     aligning = true;
+    foc.calibrated = false; /* An interrupted/failed attempt must not permit RUN. */
     integral_d = integral_q = 0.0f;
     position = previous; /* Keep alignment deltas precise after many revolutions. */
     ticks = 0u;
@@ -143,6 +149,13 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
     if (delta > 180.0f) delta -= 360.0f;
     if (delta < -180.0f) delta += 360.0f;
     if (!tracking) { delta = 0.0f; position = mechanical_deg; tracking = true; }
+    foc.angle_step = delta;
+    /* Allow twice the rated speed, so real overspeed still reaches FOC_SPEED.
+       Reject impossible 50 us jumps before Park/feedforward or speed PI sees them. */
+    if ((foc.state == FOC_RUN || foc.state == FOC_CALIBRATE || foc.state == FOC_PRECHARGE) &&
+        fabsf(delta) > 2.0f * FOC_SPEED_MAX * 6.0f / 20000.0f) {
+        foc_trip(FOC_SENSOR); return;
+    }
     previous = mechanical_deg;
     position += delta;
     foc.rpm += 0.01f * (delta * (20000.0f / 6.0f) - foc.rpm);
@@ -190,65 +203,77 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         foc.state = aligning ? FOC_CALIBRATE : FOC_RUN;
     }
     if (foc.state == FOC_RUN) {
-        /* 10 A/s command ramp, slewed at the fixed 20 kHz control rate. */
-        float step = foc.command - previous_command;
+        /* Slew the applied reference in every mode at the 20 kHz rate. */
+        float target = control.mode != CONTROL_TORQUE && control.active ? control.iq_ref : foc.command;
+        float step = target - foc.iq_ref;
         float ramp = motor_params.current_ramp * 5e-5f;
         if (step > ramp) step = ramp;
         else if (step < -ramp) step = -ramp;
-        previous_command += step;
-        foc.iq_ref = previous_command;
-        /* The 1 kHz outer loop, when scheduled, replaces the reference. It only
-           produces a value on its own millisecond, so hold the torque reference
-           on the nineteen samples in between. */
-        if (control.mode != CONTROL_TORQUE && control.active) foc.iq_ref = control.iq_ref;
+        foc.iq_ref += step;
+        /* A stalled speed loop must not hold the rotor at its current limit. */
+        if (control.active && control.mode == CONTROL_SPEED && fabsf(control.speed_target) >= 5.0f &&
+            fabsf(foc.rpm) < 5.0f && fabsf(foc.iq_ref) >= 0.9f * FOC_CURRENT_MAX) {
+            if (++ticks >= 10000u) { foc_trip(FOC_STALL); return; }
+        } else ticks = 0u;
         /* 600 Hz PI, R=.12 ohm, L=50 uH; no feedback low-pass.
            Back calculation Tt=L/R. Feedforward uses nominal motor parameters. */
         float ed = -foc.id, eq = foc.iq_ref - foc.iq;
         float ud = motor_params.current_kp * ed + integral_d - omega * MOTOR_INDUCTANCE_H * foc.iq;
         float uq = motor_params.current_kp * eq + integral_q + omega * (MOTOR_INDUCTANCE_H * foc.id + MOTOR_FLUX_WB);
-        /* Linear SVPWM ceiling; modulation also accounts for the ADC window. */
-        float limit = bus_voltage * 0.5773502692f;
-        float norm2 = ud * ud + uq * uq;
-        float scale = norm2 > limit * limit ? limit / sqrtf(norm2) : 1.0f;
-        foc.ud = ud * scale; foc.uq = uq * scale;
         /* Predict to next PWM centre (next valley + 25 us). At <=8600 RPM,
            |advance|<.32 rad: rotation error <2.9e-5, one sin/cos pair. */
         float advance = omega * ((12600.0f - FOC_HOLD_TICKS) / 168e6f);
         float a2 = advance * advance;
         float sa = advance * (1.0f - a2 / 6.0f), ca = 1.0f - a2 * (0.5f - a2 / 24.0f);
         float so = s * ca + c * sa, co = c * ca - s * sa;
-        scale = foc_modulate(foc.ud * co - foc.uq * so, foc.ud * so + foc.uq * co, bus_voltage, foc.duty);
-        foc.ud *= scale; foc.uq *= scale;
+        /* The ADC-window hexagon is inside the bus/sqrt(3) circle already:
+           max vector = 2/3 * FOC_EDGE_LIMIT/4200 * bus. Limit only once. */
+        float scale = foc_modulate(ud * co - uq * so, ud * so + uq * co, bus_voltage, foc.duty);
+        foc.ud = ud * scale; foc.uq = uq * scale;
         integral_d += motor_params.current_ki * 5e-5f * ed + MOTOR_CURRENT_ANTI_WINDUP * (foc.ud - ud);
         integral_q += motor_params.current_ki * 5e-5f * eq + MOTOR_CURRENT_ANTI_WINDUP * (foc.uq - uq);
     } else if (foc.state == FOC_CALIBRATE) {
         ++ticks;
         float theta = 0.0f, ud = MOTOR_ALIGN_VOLTAGE_V;
         if (ticks <= 10000u) ud *= (float)ticks / 10000.0f;
-        if (ticks == 30000u) origin = position;
+        if (ticks == 26000u) low = high = position;
+        if (ticks > 26000u && ticks <= 30000u) {
+            low = fminf(low, position); high = fmaxf(high, position);
+        }
+        if (ticks == 30000u) {
+            if (high - low > 1.0f) { foc_trip(FOC_ALIGNMENT); return; }
+            origin = position;
+            sum_sin = sum_cos = 0.0f;
+        }
         if (ticks > 30000u && ticks <= 70000u) theta = TURN * (float)(ticks - 30000u) / 40000.0f;
-        if (ticks == 70000u) {
-            forward = position - origin;
-            if (fabsf(forward) < (360.0f / MOTOR_POLE_PAIRS) * 0.8f ||
-                fabsf(forward) > (360.0f / MOTOR_POLE_PAIRS) * 1.2f) {
-                foc_trip(FOC_ALIGNMENT); return;
+        if (ticks == 70000u) forward = position - origin;
+        if (ticks > 70000u && ticks <= 110000u) theta = TURN * (1.0f - (float)(ticks - 70000u) / 40000.0f);
+        /* Check the swept trajectory, not just its endpoints. Average matched
+           forward/reverse angles to reduce friction/lag bias in the zero. */
+        if (ticks >= 40000u && ticks <= 110000u) {
+            float direction = (ticks <= 70000u ? position - origin : forward) > 0.0f ? 1.0f : -1.0f;
+            float error = direction * (position - origin) * (MOTOR_POLE_PAIRS * PI / 180.0f) - theta;
+            if (fabsf(error) > PI / 6.0f) { foc_trip(FOC_ALIGNMENT); return; }
+            if (ticks < 100000u && ticks % 20u == 0u) { /* 1 kHz is enough for this slow sweep. */
+                float angle = foc_wrap(direction * MOTOR_POLE_PAIRS * mechanical_deg * (PI / 180.0f) - theta);
+                sincos_fast(angle, &s, &c);
+                sum_sin += s; sum_cos += c;
             }
         }
-        if (ticks > 70000u && ticks <= 110000u) theta = TURN * (1.0f - (float)(ticks - 70000u) / 40000.0f);
-        if (ticks == 116000u) { sum_sin = sum_cos = 0.0f; low = high = position; }
+        if (ticks == 116000u) low = high = position;
         if (ticks > 116000u) {
-            float angle = mechanical_deg * (PI / 180.0f);
-            sincos_fast(angle, &s, &c);
-            sum_sin += s; sum_cos += c;
             low = fminf(low, position); high = fmaxf(high, position);
         }
         if (ticks == 120000u) {
             if (fabsf(position - origin) > 1.0f || high - low > 1.0f) {
                 foc_trip(FOC_ALIGNMENT); return;
             }
-            foc.calibration.direction = forward > 0.0f ? 1 : -1;
-            foc.calibration.zero = foc_wrap((float)foc.calibration.direction * MOTOR_POLE_PAIRS *
-                                            atan2f(sum_sin, sum_cos));
+            float zero = atan2f(sum_sin, sum_cos);
+            int direction = forward > 0.0f ? 1 : -1;
+            float error = foc_wrap((float)direction * MOTOR_POLE_PAIRS * mechanical_deg * (PI / 180.0f) - zero + PI) - PI;
+            if (fabsf(error) > PI / 6.0f) { foc_trip(FOC_ALIGNMENT); return; }
+            foc.calibration.direction = direction;
+            foc.calibration.zero = foc_wrap(zero);
             foc_stop();
             foc.state = FOC_SAVE;
             return;

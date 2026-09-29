@@ -25,19 +25,21 @@
 enum { FOC_IDLE, FOC_PRECHARGE, FOC_CALIBRATE, FOC_SAVE, FOC_RUN, FOC_FAULT, FOC_OFFSET };
 enum { FOC_OK, FOC_SENSOR, FOC_ADC, FOC_TIMING, FOC_WINDOW, FOC_ALIGNMENT,
        FOC_FLASH, FOC_COMM, FOC_BUS, FOC_ZERO, FOC_CURRENT, FOC_SPEED,
-       FOC_POSITION };
+       FOC_POSITION, FOC_STALL };
 typedef struct { float zero; int32_t direction; } foc_calibration_t;
 typedef struct {
     foc_calibration_t calibration;
     float duty[3], ud, uq, command, iq_ref, id, iq, electrical_deg, rpm;
-    float b_offset, c_offset;
+    float b_offset, c_offset, angle_step;
     volatile uint32_t state, fault;
     bool calibrated, zero_ready;
 } foc_t;
 extern foc_t foc; /* ISR-owned; foreground changes require a short IRQ critical section. */
+/* First-trip Id/Iq/Iq_ref/Ud/Uq/rpm/angle_step/timing source/timing counter. */
+extern float foc_fault[9];
 
 void foc_init(const foc_calibration_t *calibration);
-bool foc_current(float amps); /* +/-FOC_CURRENT_MAX torque, no ramp; zero does not start. */
+bool foc_current(float amps); /* Torque target, slewed by current_ramp; zero does not start. */
 bool foc_calibrate(void);
 void foc_stop(void);
 void foc_trip(uint32_t fault);

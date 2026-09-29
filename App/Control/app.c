@@ -43,6 +43,11 @@ static void telemetry(void)
         motor_params.speed_kp, motor_params.speed_ki, motor_params.position_kp,
         motor_params.current_ramp, motor_params.position_speed, INFINITY
     };
+    if (foc.state == FOC_FAULT) {
+        memcpy(frame, foc_fault, 5u * sizeof(float));
+        frame[6] = foc_fault[5]; frame[8] = foc_fault[6];
+        frame[7] = foc_fault[7]; frame[9] = foc_fault[8];
+    }
     (void)bsp_uart_write(frame, sizeof frame);
 }
 
