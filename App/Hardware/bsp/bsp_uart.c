@@ -7,18 +7,15 @@ static uint8_t s_rx[128];
 static volatile uint16_t s_used;
 static volatile uint8_t s_fill, s_busy;
 static volatile uint8_t s_rx_head, s_rx_tail;
+static bool s_rx_discard;
 volatile bsp_uart_stats_t g_uart_stats;
 
-bool bsp_uart_init(void)
+void bsp_uart_init(void)
 {
-    huart2.Init.BaudRate = 2000000u;
-    huart2.Init.OverSampling = UART_OVERSAMPLING_8;
-    if (HAL_UART_Init(&huart2) != HAL_OK) return false;
     __HAL_UART_CLEAR_OREFLAG(&huart2);
-    /* At 2 Mbps a byte arrives every 5 us. RX preempts FOC arithmetic. */
-    HAL_NVIC_SetPriority(USART2_IRQn, 0u, 0u);
+    /* Keep command RX below the priority-1 FOC sample path. */
+    HAL_NVIC_SetPriority(USART2_IRQn, 2u, 0u);
     USART2->CR1 |= USART_CR1_RXNEIE;
-    return true;
 }
 
 bool bsp_uart_write(const void *data, size_t size)
@@ -72,9 +69,17 @@ void bsp_uart_irq(void)
         uint8_t byte = (uint8_t)USART2->DR; /* SR then DR clears receive errors. */
         if (status & (USART_SR_ORE | USART_SR_FE | USART_SR_NE | USART_SR_PE)) {
             g_uart_stats.rx_errors++;
+            s_rx_discard = true;
+        } else if (s_rx_discard) {
+            if (byte == '\r' || byte == '\n') {
+                s_rx_tail = s_rx_head;
+                s_rx[s_rx_head] = '\n';
+                s_rx_head = (s_rx_head + 1u) & 127u;
+                s_rx_discard = false;
+            }
         } else {
             uint8_t next = (s_rx_head + 1u) & 127u;
-            if (next == s_rx_tail) g_uart_stats.rx_lost++;
+            if (next == s_rx_tail) { g_uart_stats.rx_lost++; s_rx_discard = true; }
             else {
                 s_rx[s_rx_head] = byte;
                 s_rx_head = next;
@@ -94,11 +99,12 @@ size_t bsp_uart_read(void *data, size_t size)
     uint8_t *out = data;
     size_t count = 0u;
     if (out == NULL) return 0u;
+    uint32_t mask = __get_PRIMASK();
+    __disable_irq();
     while (count < size && s_rx_tail != s_rx_head) {
         out[count++] = s_rx[s_rx_tail];
         s_rx_tail = (s_rx_tail + 1u) & 127u;
     }
+    __set_PRIMASK(mask);
     return count;
 }
-
-uint32_t bsp_uart_millis(void) { return HAL_GetTick(); }

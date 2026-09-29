@@ -4,7 +4,7 @@
 /* Static configuration for the fitted 5010 motor and MT6835 installation. */
 #define MOTOR_POLE_PAIRS 7.0f
 #define MOTOR_SPEED_MAX_RPM 8600.0f
-#define MOTOR_CURRENT_MAX_A 5.0f
+#define MOTOR_CURRENT_MAX_A 8.0f
 #define MOTOR_PHASE_CURRENT_TRIP_A 10.0f
 #define MOTOR_RESISTANCE_OHM 0.12f
 #define MOTOR_INDUCTANCE_H 50e-6f

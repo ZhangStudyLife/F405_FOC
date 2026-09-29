@@ -19,19 +19,16 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
-#include "can.h"
 #include "dma.h"
 #include "spi.h"
 #include "tim.h"
 #include "usart.h"
-#include "usb_device.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "foc.h"
 #include "app.h"
-#include "bsp_usb.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -100,13 +97,10 @@ int main(void)
   MX_ADC2_Init();
   MX_SPI3_Init();
   MX_USART2_UART_Init();
-  MX_CAN1_Init();
-  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
   if (!app_init()) {
     app_fault(foc.fault ? foc.fault : FOC_TIMING);
-    /* Keep USB enumerable, but never start acquisition or accept motor commands. */
-    while (1) { bsp_usb_poll(); __WFI(); }
+    while (1) { __WFI(); }
   }
   /* USER CODE END 2 */
 

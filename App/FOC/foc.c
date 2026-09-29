@@ -2,6 +2,7 @@
 #include "bsp_motor.h" /* motor_sample_us: the sample-phase timestamp. */
 #include "control.h"
 #include <math.h>
+#include "mt6835_port_stm32.h"
 #include <string.h>
 
 #define PI 3.14159265358979323846f
@@ -100,7 +101,7 @@ void foc_init(const foc_calibration_t *calibration)
 {
     memset(&foc, 0, sizeof foc);
     tracking = false;
-    aligning = calibration == NULL; /* Boot-only automatic alignment, cancelled by stop. */
+    aligning = false; /* Calibration requires an explicit calibration command. */
     ticks = 0u;
     integral_d = integral_q = variance_b = variance_c = 0.0f;
     if (calibration) { foc.calibration = *calibration; foc.calibrated = true; }
@@ -109,7 +110,7 @@ void foc_init(const foc_calibration_t *calibration)
 
 bool foc_current(float amps)
 {
-    if (!isfinite(amps) || fabsf(amps) > 5.0f) return false;
+    if (!isfinite(amps) || fabsf(amps) > FOC_CURRENT_MAX) return false;
     if (!foc.calibrated || !foc.zero_ready || (foc.state != FOC_IDLE && foc.state != FOC_RUN)) return false;
     foc.command = amps;
     if (foc.state == FOC_IDLE && amps != 0.0f) {
@@ -126,6 +127,7 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
     if (!isfinite(mechanical_deg)) { foc_trip(FOC_SENSOR); return; }
     if (!isfinite(b_voltage) || !isfinite(c_voltage)) { foc_trip(FOC_ADC); return; }
     if (!isfinite(encoder_delay) || encoder_delay < 0.0f || encoder_delay > 50e-6f) {
+        mt6835_timing_fault = 2u;
         foc_trip(FOC_TIMING); return;
     }
     if (foc.state == FOC_PRECHARGE || foc.state == FOC_RUN || foc.state == FOC_CALIBRATE) {
@@ -190,22 +192,20 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
     if (foc.state == FOC_RUN) {
         /* 10 A/s command ramp, slewed at the fixed 20 kHz control rate. */
         float step = foc.command - previous_command;
-        if (step > 5e-4f) step = 5e-4f;
-        else if (step < -5e-4f) step = -5e-4f;
+        float ramp = motor_params.current_ramp * 5e-5f;
+        if (step > ramp) step = ramp;
+        else if (step < -ramp) step = -ramp;
         previous_command += step;
         foc.iq_ref = previous_command;
         /* The 1 kHz outer loop, when scheduled, replaces the reference. It only
            produces a value on its own millisecond, so hold the torque reference
            on the nineteen samples in between. */
-        uint32_t outer_fault = control_fault();
-        if (outer_fault) { foc_trip(outer_fault); return; }
-        if (control_mode() != CONTROL_TORQUE && control_scheduled())
-            foc.iq_ref = control_iq_ref();
+        if (control.mode != CONTROL_TORQUE && control.active) foc.iq_ref = control.iq_ref;
         /* 600 Hz PI, R=.12 ohm, L=50 uH; no feedback low-pass.
            Back calculation Tt=L/R. Feedforward uses nominal motor parameters. */
         float ed = -foc.id, eq = foc.iq_ref - foc.iq;
-        float ud = MOTOR_CURRENT_KP * ed + integral_d - omega * MOTOR_INDUCTANCE_H * foc.iq;
-        float uq = MOTOR_CURRENT_KP * eq + integral_q + omega * (MOTOR_INDUCTANCE_H * foc.id + MOTOR_FLUX_WB);
+        float ud = motor_params.current_kp * ed + integral_d - omega * MOTOR_INDUCTANCE_H * foc.iq;
+        float uq = motor_params.current_kp * eq + integral_q + omega * (MOTOR_INDUCTANCE_H * foc.id + MOTOR_FLUX_WB);
         /* Linear SVPWM ceiling; modulation also accounts for the ADC window. */
         float limit = bus_voltage * 0.5773502692f;
         float norm2 = ud * ud + uq * uq;
@@ -219,8 +219,8 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         float so = s * ca + c * sa, co = c * ca - s * sa;
         scale = foc_modulate(foc.ud * co - foc.uq * so, foc.ud * so + foc.uq * co, bus_voltage, foc.duty);
         foc.ud *= scale; foc.uq *= scale;
-        integral_d += MOTOR_CURRENT_KI_TS * ed + MOTOR_CURRENT_ANTI_WINDUP * (foc.ud - ud);
-        integral_q += MOTOR_CURRENT_KI_TS * eq + MOTOR_CURRENT_ANTI_WINDUP * (foc.uq - uq);
+        integral_d += motor_params.current_ki * 5e-5f * ed + MOTOR_CURRENT_ANTI_WINDUP * (foc.ud - ud);
+        integral_q += motor_params.current_ki * 5e-5f * eq + MOTOR_CURRENT_ANTI_WINDUP * (foc.uq - uq);
     } else if (foc.state == FOC_CALIBRATE) {
         ++ticks;
         float theta = 0.0f, ud = MOTOR_ALIGN_VOLTAGE_V;

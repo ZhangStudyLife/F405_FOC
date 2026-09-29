@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "motor_config.h"
+#include "motor_params.h"
 
 #define FOC_BUS_MIN 8.0f
 #define FOC_BUS_MAX 36.0f
@@ -23,7 +24,7 @@
 
 enum { FOC_IDLE, FOC_PRECHARGE, FOC_CALIBRATE, FOC_SAVE, FOC_RUN, FOC_FAULT, FOC_OFFSET };
 enum { FOC_OK, FOC_SENSOR, FOC_ADC, FOC_TIMING, FOC_WINDOW, FOC_ALIGNMENT,
-       FOC_FLASH, FOC_UART, FOC_BUS, FOC_ZERO, FOC_CURRENT, FOC_SPEED,
+       FOC_FLASH, FOC_COMM, FOC_BUS, FOC_ZERO, FOC_CURRENT, FOC_SPEED,
        FOC_POSITION };
 typedef struct { float zero; int32_t direction; } foc_calibration_t;
 typedef struct {
@@ -36,7 +37,7 @@ typedef struct {
 extern foc_t foc; /* ISR-owned; foreground changes require a short IRQ critical section. */
 
 void foc_init(const foc_calibration_t *calibration);
-bool foc_current(float amps); /* +/-5 A torque, no reference ramp; zero does not start. */
+bool foc_current(float amps); /* +/-FOC_CURRENT_MAX torque, no ramp; zero does not start. */
 bool foc_calibrate(void);
 void foc_stop(void);
 void foc_trip(uint32_t fault);

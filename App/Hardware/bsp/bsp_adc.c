@@ -7,9 +7,6 @@ static volatile uint32_t s_raw[2]; /* CDR: ADC2 in high half, ADC1 in low half. 
 volatile bsp_adc_sample_t adc_sample;
 volatile uint16_t adc_raw_b, adc_raw_c, adc_raw_bus;
 volatile uint32_t adc_errors;
-#ifdef FOC_CAPTURE
-volatile uint16_t adc_debug[4];
-#endif
 
 void bsp_adc_start(void)
 {
@@ -53,9 +50,6 @@ void bsp_adc_start(void)
 
 bool bsp_adc_read(void)
 {
-#ifdef FOC_CAPTURE
-    adc_debug[3] = (uint16_t)TIM8->CNT;
-#endif
     uint32_t flags = DMA2->LISR;
     DMA2->LIFCR = 0x3du;
     if ((flags & (DMA_LISR_TCIF0 | DMA_LISR_TEIF0 | DMA_LISR_DMEIF0 | DMA_LISR_FEIF0)) != DMA_LISR_TCIF0 ||
@@ -71,11 +65,6 @@ bool bsp_adc_read(void)
         return false;
     }
     uint32_t phases = s_raw[0];
-#ifdef FOC_CAPTURE
-    adc_debug[0] = (uint16_t)phases;
-    adc_debug[1] = (uint16_t)(phases >> 16);
-    adc_debug[2] = (uint16_t)s_raw[1];
-#endif
     adc_raw_b = (uint16_t)phases;
     adc_raw_c = (uint16_t)(phases >> 16);
     adc_raw_bus = (uint16_t)s_raw[1];

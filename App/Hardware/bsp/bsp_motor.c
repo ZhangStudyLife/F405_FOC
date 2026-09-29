@@ -17,7 +17,7 @@ volatile uint32_t motor_cycles, motor_period_min = UINT32_MAX, motor_period_max,
 volatile uint32_t motor_sample_us;
 volatile uint32_t motor_write_min = 4200u, motor_timing_fault;
 
-void bsp_motor_arm(void) { inhibited = false; }
+void bsp_motor_arm(void) { motor_timing_fault = 0u; inhibited = false; }
 
 void bsp_motor_off(void)
 {
@@ -41,7 +41,7 @@ void bsp_motor_init(void)
     last_sample = 0u;
     motor_period_min = UINT32_MAX;
     motor_period_max = motor_work_max = motor_cycles = 0u;
-    motor_write_min = 4200u; motor_timing_fault = 0u;
+    motor_write_min = 4200u;
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
     /* APB1 timer clock is 84 MHz. TIM5 is dedicated to acquisition timestamps. */
@@ -74,7 +74,7 @@ void bsp_motor_init(void)
 bool bsp_motor_write(const float duty[3], unsigned mode)
 {
     /* All three preloads must be written before the next valley, never across it. */
-    uint32_t counter = TIM8->CNT;
+    uint32_t counter = TIM8->CNT & 0xffffu;
     if (counter < motor_write_min) motor_write_min = counter;
     if (inhibited || !(TIM8->CR1 & TIM_CR1_DIR) || counter < 600u) {
         motor_timing_fault = 1u | (counter << 8); return false;
@@ -84,7 +84,8 @@ bool bsp_motor_write(const float duty[3], unsigned mode)
     TIM8->CCR3 = mode == MOTOR_PWM ? (uint32_t)(duty[2] * 4200.0f + 0.5f) : 0u;
     pending_mode = mode;
     ready = true;
-    return !inhibited;
+    if (inhibited) { motor_timing_fault = 1u | (counter << 8); return false; }
+    return true;
 }
 
 bool bsp_motor_update(void)
@@ -92,7 +93,7 @@ bool bsp_motor_update(void)
     TIM8->SR = ~TIM_SR_UIF;
     if ((TIM8->CR1 & TIM_CR1_DIR) || TIM8->CNT > 600u ||
         (!ready && motor_mode != MOTOR_OFF)) {
-        motor_timing_fault = 2u | (TIM8->CNT << 8);
+        motor_timing_fault = 2u | ((TIM8->CNT & 0xffffu) << 8);
         bsp_motor_off(); return false;
     }
     /* A priority-0 fault may interrupt the priority-1 FOC write. Never let
@@ -149,30 +150,49 @@ void bsp_motor_sample_end(void)
     if (elapsed > motor_work_max) motor_work_max = elapsed;
 }
 
-bool bsp_motor_load(foc_calibration_t *calibration)
+static uint32_t saved_record(motor_record_t *record)
 {
-    const record_t *r = (const record_t *)0x080e0000u;
-    if (!record_valid(r)) return false;
-    *calibration = r->cal;
+    motor_record_t other;
+    bool a = record_decode((const void *)0x080c0000u, record);
+    bool b = record_decode((const void *)0x080e0000u, &other);
+    if (b && (!a || (int32_t)(other.generation - record->generation) > 0)) {
+        *record = other;
+        return 0x080e0000u;
+    }
+    return a ? 0x080c0000u : 0u;
+}
+
+bool bsp_motor_load(foc_calibration_t *calibration, motor_params_t *params)
+{
+    motor_record_t record;
+    if (!saved_record(&record)) return false;
+    *calibration = record.cal;
+    *params = record.params;
     return true;
 }
 
 bool bsp_motor_save(const foc_calibration_t *calibration)
 {
     if (motor_mode != MOTOR_OFF || (TIM8->CR1 & TIM_CR1_CEN)) return false;
-    record_t r = {.version = 1u, .poles = 7u, .cal = *calibration, .magic = 0x464f4331u};
-    r.checksum = checksum(&r);
-    FLASH_EraseInitTypeDef erase = {.TypeErase = FLASH_TYPEERASE_SECTORS,
-        .VoltageRange = FLASH_VOLTAGE_RANGE_3, .Sector = FLASH_SECTOR_11, .NbSectors = 1u};
+    motor_record_t previous = {0};
+    uint32_t source = saved_record(&previous);
+    uint32_t target = source == 0x080c0000u ? 0x080e0000u : 0x080c0000u;
+    motor_record_t record = {.version=3u, .generation=source ? previous.generation + 1u : 1u,
+        .poles=(uint32_t)MOTOR_POLE_PAIRS, .cal=*calibration, .params=motor_params, .magic=0x464f4333u};
+    record.checksum = record_checksum(&record, offsetof(motor_record_t, checksum));
+    motor_record_t checked;
+    if (!record_decode(&record, &checked)) return false;
+    FLASH_EraseInitTypeDef erase = {.TypeErase=FLASH_TYPEERASE_SECTORS,
+        .VoltageRange=FLASH_VOLTAGE_RANGE_3, .Sector=target == 0x080c0000u ? FLASH_SECTOR_10 : FLASH_SECTOR_11, .NbSectors=1u};
     uint32_t failed;
     if (HAL_FLASH_Unlock() != HAL_OK) return false;
     bool ok = HAL_FLASHEx_Erase(&erase, &failed) == HAL_OK;
-    for (unsigned i = 0; ok && i < sizeof r; i += 4u) {
+    /* Commit marker is the last word; a torn write cannot replace the old record. */
+    for (unsigned i = 0; ok && i < sizeof record; i += 4u) {
         uint32_t word;
-        memcpy(&word, (const uint8_t *)&r + i, sizeof word);
-        ok = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, 0x080e0000u + i, word) == HAL_OK;
+        memcpy(&word, (const uint8_t *)&record + i, sizeof word);
+        ok = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, target + i, word) == HAL_OK;
     }
     HAL_FLASH_Lock();
-    foc_calibration_t readback;
-    return ok && bsp_motor_load(&readback) && memcmp(&readback, calibration, sizeof readback) == 0;
+    return ok && record_decode((const void *)target, &checked) && memcmp(&record, &checked, sizeof record) == 0;
 }

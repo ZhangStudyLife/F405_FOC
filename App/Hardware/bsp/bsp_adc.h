@@ -15,9 +15,6 @@ extern volatile bsp_adc_sample_t adc_sample;
    re-derive currents once a reference measurement exists. */
 extern volatile uint16_t adc_raw_b, adc_raw_c, adc_raw_bus;
 extern volatile uint32_t adc_errors;
-#ifdef FOC_CAPTURE
-extern volatile uint16_t adc_debug[4]; /* B/C/bus raw codes and ADC-read entry CNT, not hold time. */
-#endif
 
 void bsp_adc_start(void);
 void bsp_adc_stop(void);

@@ -9,6 +9,7 @@ static uint8_t s_rx[6];
 volatile float mt6835_angle_deg = NAN, mt6835_sample_delay;
 volatile float mt6835_raw_deg = NAN;
 volatile uint32_t mt6835_errors;
+volatile uint32_t mt6835_timing_fault, mt6835_last_counter;
 volatile uint32_t mt6835_first_error; /* 1: busy, 2: DMA; otherwise raw angle/status/CRC bytes. */
 
 /* Initialization only: register 0x001 is user RAM, not a device ID. */
@@ -64,8 +65,21 @@ void mt6835_start(void)
     DMA1_Stream0->NDTR = sizeof s_rx;
     DMA1_Stream5->NDTR = sizeof s_tx;
     /* CS is only a proxy for angle time; internal sensor latency is uncalibrated.
-       First-rank conversion finishes after the timer peak, before bus rank. */
-    mt6835_sample_delay = (8400.0f - (float)TIM8->CNT - FOC_HOLD_TICKS) / 168e6f;
+       Keep the calculation bounded: an invalid timer read must not become a
+       large positive float through unsigned arithmetic or memory corruption. */
+    uint32_t counter = TIM8->CNT & 0xffffu;
+    mt6835_last_counter = counter;
+    if (counter > 8400u) {
+        mt6835_sample_delay = NAN;
+        mt6835_timing_fault = 1u;
+        if (!mt6835_first_error) mt6835_first_error = 3u;
+        mt6835_errors++;
+        return;
+    }
+    uint32_t ticks = (TIM8->CR1 & TIM_CR1_DIR)
+        ? (counter > FOC_HOLD_TICKS ? counter - FOC_HOLD_TICKS : 0u)
+        : (8400u - counter > FOC_HOLD_TICKS ? 8400u - counter - FOC_HOLD_TICKS : 0u);
+    mt6835_sample_delay = (float)ticks / 168e6f;
     GPIOA->BSRR = GPIO_PIN_0 << 16;
     DMA1_Stream0->CR |= DMA_SxCR_EN;
     DMA1_Stream5->CR |= DMA_SxCR_EN;
