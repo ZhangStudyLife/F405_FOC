@@ -23,5 +23,6 @@ size_t bsp_uart_read(void *data, size_t size);
 void bsp_uart_tick(void);
 /* USART2 IRQ hook. */
 void bsp_uart_irq(void);
+void bsp_uart_rx_irq(void);
 
 #endif

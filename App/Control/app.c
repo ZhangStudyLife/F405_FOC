@@ -30,7 +30,7 @@ void app_fault(uint32_t fault)
     foc_trip(fault);
 }
 
-/* 24 numeric channels and the JustFloat tail: 100 bytes, 250 Hz. */
+/* 24 numeric channels and the JustFloat tail: 100 bytes, 500 Hz. */
 static void telemetry(void)
 {
     float frame[] = {
@@ -69,7 +69,7 @@ void app_sample(void)
     else if (!bsp_motor_write(foc.duty, mode)) app_fault(FOC_TIMING);
     bsp_motor_unlock(key);
     foc_outer_step();
-    if (++telemetry_divider == 80u) {
+    if (++telemetry_divider == 40u) {
         telemetry_divider = 0;
         telemetry();
     }

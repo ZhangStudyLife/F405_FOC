@@ -39,9 +39,9 @@ bool mt6835_init(void)
     DMA1_Stream0->M0AR = (uint32_t)s_rx;
     DMA1_Stream0->CR = DMA_SxCR_MINC | DMA_SxCR_PL_1 |
                           DMA_SxCR_TCIE | DMA_SxCR_TEIE | DMA_SxCR_DMEIE;
-    DMA1_Stream5->PAR = (uint32_t)&SPI3->DR;
-    DMA1_Stream5->M0AR = (uint32_t)s_tx;
-    DMA1_Stream5->CR = DMA_SxCR_MINC | DMA_SxCR_PL_1 | DMA_SxCR_DIR_0;
+    DMA1_Stream7->PAR = (uint32_t)&SPI3->DR;
+    DMA1_Stream7->M0AR = (uint32_t)s_tx;
+    DMA1_Stream7->CR = DMA_SxCR_MINC | DMA_SxCR_PL_1 | DMA_SxCR_DIR_0;
     (void)SPI3->DR;
     (void)SPI3->SR;
     SPI3->CR1 |= SPI_CR1_SPE;
@@ -54,16 +54,16 @@ bool mt6835_init(void)
 void mt6835_start(void)
 {
     /* A transfer must finish within the preceding 50 us period. */
-    if ((DMA1_Stream0->CR | DMA1_Stream5->CR) & DMA_SxCR_EN) {
+    if ((DMA1_Stream0->CR | DMA1_Stream7->CR) & DMA_SxCR_EN) {
         mt6835_angle_deg = NAN;
         if (!mt6835_first_error) mt6835_first_error = 1u;
         mt6835_errors++;
         return;
     }
     DMA1->LIFCR = 0x3du;      /* Stream 0 only. */
-    DMA1->HIFCR = 0xf40u;     /* Stream 5 only; UART uses stream 6. */
+    DMA1->HIFCR = 0xf400000u;  /* Stream 7 only; UART uses streams 5/6. */
     DMA1_Stream0->NDTR = sizeof s_rx;
-    DMA1_Stream5->NDTR = sizeof s_tx;
+    DMA1_Stream7->NDTR = sizeof s_tx;
     /* CS is only a proxy for angle time; internal sensor latency is uncalibrated.
        Keep the calculation bounded: an invalid timer read must not become a
        large positive float through unsigned arithmetic or memory corruption. */
@@ -80,7 +80,7 @@ void mt6835_start(void)
     mt6835_sample_delay = (float)(ticks > FOC_HOLD_TICKS ? ticks - FOC_HOLD_TICKS : 0u) / 168e6f;
     GPIOA->BSRR = GPIO_PIN_0 << 16;
     DMA1_Stream0->CR |= DMA_SxCR_EN;
-    DMA1_Stream5->CR |= DMA_SxCR_EN;
+    DMA1_Stream7->CR |= DMA_SxCR_EN;
 }
 
 void mt6835_finish(void)
@@ -93,8 +93,8 @@ void mt6835_finish(void)
     GPIOA->BSRR = GPIO_PIN_0;
     if ((flags & (DMA_LISR_TCIF0 | DMA_LISR_TEIF0 | DMA_LISR_DMEIF0 | DMA_LISR_FEIF0)) != DMA_LISR_TCIF0) {
         DMA1_Stream0->CR &= ~DMA_SxCR_EN;
-        DMA1_Stream5->CR &= ~DMA_SxCR_EN;
-        while ((DMA1_Stream0->CR | DMA1_Stream5->CR) & DMA_SxCR_EN) {}
+        DMA1_Stream7->CR &= ~DMA_SxCR_EN;
+        while ((DMA1_Stream0->CR | DMA1_Stream7->CR) & DMA_SxCR_EN) {}
         (void)SPI3->DR;
         (void)SPI3->SR;
         mt6835_angle_deg = mt6835_raw_deg = NAN;
@@ -113,12 +113,12 @@ void mt6835_finish(void)
 void mt6835_stop(void)
 {
     DMA1_Stream0->CR &= ~DMA_SxCR_EN;
-    DMA1_Stream5->CR &= ~DMA_SxCR_EN;
-    while ((DMA1_Stream0->CR | DMA1_Stream5->CR) & DMA_SxCR_EN) {}
+    DMA1_Stream7->CR &= ~DMA_SxCR_EN;
+    while ((DMA1_Stream0->CR | DMA1_Stream7->CR) & DMA_SxCR_EN) {}
     SPI3->CR1 &= ~SPI_CR1_SPE;
     (void)SPI3->DR; (void)SPI3->SR;
     GPIOA->BSRR = GPIO_PIN_0;
-    DMA1->LIFCR = 0x3du; DMA1->HIFCR = 0xf40u;
+    DMA1->LIFCR = 0x3du; DMA1->HIFCR = 0xf400000u;
     HAL_NVIC_ClearPendingIRQ(DMA1_Stream0_IRQn);
     SPI3->CR1 |= SPI_CR1_SPE;
 }

@@ -259,6 +259,11 @@ void USART2_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+void DMA1_Stream5_IRQHandler(void)
+{
+    bsp_uart_rx_irq();
+}
+
 void DMA2_Stream0_IRQHandler(void)
 {
     /* First pair ready: overlap encoder SPI with the second (bus) ADC rank. */

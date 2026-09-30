@@ -4,7 +4,7 @@ STM32F405 C11 firmware. Read App/README.md for wiring, commands and waveform cha
 
 - Keep handwritten code in App. Use simple functions and named state; no extra frameworks.
 - Preserve existing uncommitted changes and Flash calibration.
-- Current loop 20 kHz; speed/position 1 kHz; UART JustFloat 250 Hz.
+- Current loop 20 kHz; speed/position 1 kHz; UART JustFloat 500 Hz.
 - Core/Drivers are CubeMX/HAL/CMSIS. Keep edits in USER CODE blocks where possible.
 - Update 405_FOC.ioc and regenerate; do not manually edit cmake/stm32cubemx/CMakeLists.txt.
 - Build: cmake --preset Debug/Release, then cmake --build --preset Debug/Release.
