@@ -11,6 +11,7 @@
 static unsigned telemetry_divider;
 static volatile uint32_t last_sample;
 static volatile uint32_t command_count, command_result;
+static uint32_t last_command_ms;
 enum { UNKNOWN, STOP, CLEAR, CAL, ZERO, TORQUE, SPEED, POSITION, SET_PARAM, SAVE };
 
 bool app_init(void)
@@ -30,24 +31,30 @@ void app_fault(uint32_t fault)
     foc_trip(fault);
 }
 
-/* 24 numeric channels and the JustFloat tail: 100 bytes, 500 Hz. */
+/* 20 numeric channels and the JustFloat tail: 84 bytes, 500 Hz. */
 static void telemetry(void)
 {
     float frame[] = {
-        foc.id, foc.iq, foc.iq_ref, foc.ud, foc.uq, adc_sample.bus_voltage,
+        foc.id, foc.iq, foc.iq_ref, adc_sample.bus_voltage,
         control.speed, control.speed_target, control.position, control.position_target,
-        (float)control.mode, (float)foc.state, (float)foc.fault,
+        mt6835_raw_deg, adc_sample.b_voltage, adc_sample.c_voltage,
+        foc.b_offset, foc.c_offset, foc.b_std_mv, foc.c_std_mv, 0.0f,
         (float)command_count, (float)command_result, (float)g_uart_stats.tx_rejected,
-        (float)foc.calibrated,
-        motor_params.current_kp, motor_params.current_ki,
-        motor_params.speed_kp, motor_params.speed_ki, motor_params.position_kp,
-        motor_params.current_ramp, motor_params.position_speed, INFINITY
+        0.0f, INFINITY
     };
     if (foc.state == FOC_FAULT) {
-        memcpy(frame, foc_fault, 5u * sizeof(float));
-        frame[6] = foc_fault[5]; frame[8] = foc_fault[6];
-        frame[7] = foc_fault[7]; frame[9] = foc_fault[8];
+        memcpy(frame, foc_fault, 3u * sizeof(float));
+        frame[19] = foc_fault[4];
     }
+    uint32_t status = foc.state | (foc.fault << 3) | (control.mode << 7) |
+        ((uint32_t)foc.zero_ready << 9) | ((uint32_t)foc.calibrated << 10) |
+        ((uint32_t)isfinite(mt6835_raw_deg) << 11) |
+        ((uint32_t)(isfinite(frame[0]) && isfinite(frame[1])) << 12) |
+        ((uint32_t)(isfinite(frame[9]) && isfinite(frame[10]) && isfinite(frame[3])) << 13) |
+        ((uint32_t)foc.zero_fault << 14) | ((uint32_t)foc.zero_complete << 22) |
+        ((uint32_t)(motor_mode != MOTOR_OFF) << 23);
+    if (foc.state == FOC_FAULT) status |= ((uint32_t)foc_fault[3] << 18) | ((uint32_t)foc_fault[5] << 20);
+    frame[15] = (float)status;
     (void)bsp_uart_write(frame, sizeof frame);
 }
 
@@ -99,6 +106,8 @@ static bool parse_decimal(const char *text, float *value)
 
 bool app_command(const char *line)
 {
+    last_command_ms = HAL_GetTick();
+    GPIOD->BSRR = GPIO_PIN_2 << 16;
     unsigned command = UNKNOWN;
     float value = 0;
     float *parameter = NULL;
@@ -142,6 +151,7 @@ bool app_command(const char *line)
              fabsf(adc_sample.c_voltage - foc.c_offset) < 0.04f &&
              fabsf(adc_sample.b_voltage + adc_sample.c_voltage - foc.b_offset - foc.c_offset) < 0.04f));
         if (valid) {
+            motor_timing_fault = mt6835_timing_fault = 0u;
             foc.fault = FOC_OK;
             if (foc.zero_ready) foc.state = FOC_IDLE;
             else {
@@ -203,6 +213,7 @@ void app_poll(void)
         } else if (ch >= 32 && ch < 127 && length < sizeof line - 1) line[length++] = (char)ch;
         else overflow = true;
     }
+    if (HAL_GetTick() - last_command_ms >= 100u) GPIOD->BSRR = GPIO_PIN_2;
     if (foc.state == FOC_SAVE) {
         uint32_t key = bsp_motor_lock();
         bsp_motor_off(); bsp_adc_stop(); mt6835_stop();

@@ -15,8 +15,9 @@
 #define MOTOR_CURRENT_ANTI_WINDUP 0.12f
 #define MOTOR_ALIGN_VOLTAGE_V 0.6f
 
-#define MOTOR_SPEED_KP 0.005f
-#define MOTOR_SPEED_KI 0.01f
+/* Low-speed bench candidate; gains are A/rpm and A/(rpm*s). */
+#define MOTOR_SPEED_KP 0.1f
+#define MOTOR_SPEED_KI 2.0f
 #define MOTOR_POSITION_KP 4.0f
 
 #endif

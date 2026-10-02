@@ -8,10 +8,10 @@
 #define PI 3.14159265358979323846f
 #define TURN (2.0f * PI)
 foc_t foc;
-float foc_fault[9];
+float foc_fault[6];
 static float previous, position, origin, forward, sum_sin, sum_cos, low, high;
 static uint32_t ticks;
-static float integral_d, integral_q, variance_b, variance_c;
+static float integral_d, integral_q, variance_b, variance_c, position_roundoff;
 static bool tracking, aligning;
 
 static void sincos_fast(float theta, float *s, float *c)
@@ -84,8 +84,10 @@ void foc_trip(uint32_t fault)
     if (foc.state != FOC_FAULT) {
         foc.fault = fault;
         foc.state = FOC_FAULT;
-        float sample[] = {foc.id, foc.iq, foc.iq_ref, foc.ud, foc.uq, foc.rpm, foc.angle_step,
-                          (float)(motor_timing_fault & 255u), (float)(motor_timing_fault >> 8)};
+        float sample[] = {foc.id, foc.iq, foc.iq_ref, (float)(motor_timing_fault & 255u),
+                          (float)((motor_timing_fault & 255u) ? motor_timing_fault >> 8 :
+                                  mt6835_timing_fault == 1u ? mt6835_last_counter : 0u),
+                          (float)mt6835_timing_fault};
         memcpy(foc_fault, sample, sizeof sample);
     }
     foc_stop();
@@ -98,6 +100,7 @@ bool foc_calibrate(void)
     foc.calibrated = false; /* An interrupted/failed attempt must not permit RUN. */
     integral_d = integral_q = 0.0f;
     position = previous; /* Keep alignment deltas precise after many revolutions. */
+    position_roundoff = 0.0f;
     ticks = 0u;
     foc.state = FOC_PRECHARGE;
     return true;
@@ -105,8 +108,9 @@ bool foc_calibrate(void)
 
 void foc_init(const foc_calibration_t *calibration)
 {
-    memset(&foc, 0, sizeof foc);
-    tracking = false;
+    /* Current reinitialization must preserve encoder feedback and accumulation. */
+    foc = (foc_t){.rpm = foc.rpm, .angle_step = foc.angle_step,
+                  .id = NAN, .iq = NAN, .state = FOC_OFFSET};
     aligning = false; /* Calibration requires an explicit calibration command. */
     ticks = 0u;
     integral_d = integral_q = variance_b = variance_c = 0.0f;
@@ -131,6 +135,28 @@ bool foc_current(float amps)
 void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_voltage, float encoder_delay)
 {
     if (!isfinite(mechanical_deg)) { foc_trip(FOC_SENSOR); return; }
+    float s, c;
+    /* This encoder: repeatable second harmonic measured during unpowered coast. */
+    sincos_fast(mechanical_deg * (PI / 90.0f), &s, &c);
+    mechanical_deg += MOTOR_ENCODER_HARMONIC_DEG * c;
+    float delta = mechanical_deg - previous;
+    if (delta > 180.0f) delta -= 360.0f;
+    if (delta < -180.0f) delta += 360.0f;
+    if (!tracking) { delta = 0.0f; position = mechanical_deg; position_roundoff = 0.0f; tracking = true; }
+    foc.angle_step = delta;
+    /* Allow twice the rated speed, so real overspeed still reaches FOC_SPEED.
+       Reject impossible 50 us jumps before Park/feedforward or speed PI sees them. */
+    if ((foc.state == FOC_RUN || foc.state == FOC_CALIBRATE || foc.state == FOC_PRECHARGE) &&
+        fabsf(delta) > 2.0f * FOC_SPEED_MAX * 6.0f / 20000.0f) {
+        foc_trip(FOC_SENSOR); return;
+    }
+    previous = mechanical_deg;
+    /* Preserve sub-ULP low-speed motion after many accumulated turns. */
+    float increment = delta - position_roundoff;
+    float next_position = position + increment;
+    position_roundoff = (next_position - position) - increment;
+    position = next_position;
+    foc.rpm += 0.01f * (delta * (20000.0f / 6.0f) - foc.rpm);
     if (!isfinite(b_voltage) || !isfinite(c_voltage)) { foc_trip(FOC_ADC); return; }
     if (!isfinite(encoder_delay) || encoder_delay < 0.0f || encoder_delay > 50e-6f) {
         mt6835_timing_fault = 2u;
@@ -141,24 +167,6 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
             foc_trip(FOC_BUS); return;
         }
     }
-    float s, c;
-    /* This encoder: repeatable second harmonic measured during unpowered coast. */
-    sincos_fast(mechanical_deg * (PI / 90.0f), &s, &c);
-    mechanical_deg += MOTOR_ENCODER_HARMONIC_DEG * c;
-    float delta = mechanical_deg - previous;
-    if (delta > 180.0f) delta -= 360.0f;
-    if (delta < -180.0f) delta += 360.0f;
-    if (!tracking) { delta = 0.0f; position = mechanical_deg; tracking = true; }
-    foc.angle_step = delta;
-    /* Allow twice the rated speed, so real overspeed still reaches FOC_SPEED.
-       Reject impossible 50 us jumps before Park/feedforward or speed PI sees them. */
-    if ((foc.state == FOC_RUN || foc.state == FOC_CALIBRATE || foc.state == FOC_PRECHARGE) &&
-        fabsf(delta) > 2.0f * FOC_SPEED_MAX * 6.0f / 20000.0f) {
-        foc_trip(FOC_SENSOR); return;
-    }
-    previous = mechanical_deg;
-    position += delta;
-    foc.rpm += 0.01f * (delta * (20000.0f / 6.0f) - foc.rpm);
     if (foc.state == FOC_OFFSET) {
         if (fabsf(foc.rpm) >= 5.0f || fabsf(delta) >= 5.0f * 6.0f / 20000.0f) {
             ticks = 0u;
@@ -172,8 +180,13 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         variance_b += db * (b_voltage - foc.b_offset);
         variance_c += dc * (c_voltage - foc.c_offset);
         if (ticks == 6048u) {
-            if (foc.b_offset < 1.4f || foc.b_offset > 1.9f || foc.c_offset < 1.4f || foc.c_offset > 1.9f ||
-                variance_b > 2048.0f * 4e-6f || variance_c > 2048.0f * 4e-6f) {
+            foc.b_std_mv = sqrtf(variance_b / 2048.0f) * 1000.0f;
+            foc.c_std_mv = sqrtf(variance_c / 2048.0f) * 1000.0f;
+            foc.zero_complete = true;
+            foc.zero_fault = (foc.b_offset < 1.4f || foc.b_offset > 1.9f) |
+                ((foc.c_offset < 1.4f || foc.c_offset > 1.9f) << 1) |
+                ((variance_b > 2048.0f * 16e-6f) << 2) | ((variance_c > 2048.0f * 16e-6f) << 3);
+            if (foc.zero_fault) {
                 foc_trip(FOC_ZERO); return;
             }
             foc.zero_ready = true;
@@ -182,7 +195,7 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         }
         return;
     }
-    if (!foc.zero_ready) { foc.id = foc.iq = 0.0f; return; }
+    if (!foc.zero_ready) { foc.id = foc.iq = NAN; return; }
     float omega = (float)foc.calibration.direction * MOTOR_POLE_PAIRS * foc.rpm * (TURN / 60.0f);
     float theta = foc_wrap((float)foc.calibration.direction * MOTOR_POLE_PAIRS * mechanical_deg * (PI / 180.0f) -
                           foc.calibration.zero - omega * encoder_delay);

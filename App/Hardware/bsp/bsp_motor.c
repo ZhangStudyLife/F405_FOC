@@ -91,6 +91,8 @@ bool bsp_motor_write(const float duty[3], unsigned mode)
 bool bsp_motor_update(void)
 {
     TIM8->SR = ~TIM_SR_UIF;
+    /* Gate-off reinitialization has no PWM deadline. A queued start still does. */
+    if (motor_mode == MOTOR_OFF && !ready) return true;
     if ((TIM8->CR1 & TIM_CR1_DIR) || TIM8->CNT > 600u ||
         (!ready && motor_mode != MOTOR_OFF)) {
         motor_timing_fault = 2u | ((TIM8->CNT & 0xffffu) << 8);

@@ -30,13 +30,14 @@ typedef struct { float zero; int32_t direction; } foc_calibration_t;
 typedef struct {
     foc_calibration_t calibration;
     float duty[3], ud, uq, command, iq_ref, id, iq, electrical_deg, rpm;
-    float b_offset, c_offset, angle_step;
+    float b_offset, c_offset, angle_step, b_std_mv, c_std_mv;
     volatile uint32_t state, fault;
-    bool calibrated, zero_ready;
+    uint8_t zero_fault;
+    bool calibrated, zero_ready, zero_complete;
 } foc_t;
 extern foc_t foc; /* ISR-owned; foreground changes require a short IRQ critical section. */
-/* First-trip Id/Iq/Iq_ref/Ud/Uq/rpm/angle_step/timing source/timing counter. */
-extern float foc_fault[9];
+/* First-trip Id/Iq/Iq_ref/BSP timing source/counter/encoder timing source. */
+extern float foc_fault[6];
 
 void foc_init(const foc_calibration_t *calibration);
 bool foc_current(float amps); /* Torque target, slewed by current_ramp; zero does not start. */

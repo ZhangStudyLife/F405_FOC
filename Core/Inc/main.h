@@ -59,6 +59,8 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define MT6835_CS_Pin GPIO_PIN_0
 #define MT6835_CS_GPIO_Port GPIOA
+#define COMMAND_LED_Pin GPIO_PIN_2
+#define COMMAND_LED_GPIO_Port GPIOD
 
 /* USER CODE BEGIN Private defines */
 

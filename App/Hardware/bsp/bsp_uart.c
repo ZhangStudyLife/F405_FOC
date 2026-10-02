@@ -28,16 +28,13 @@ void bsp_uart_init(void)
 bool bsp_uart_write(const void *data, size_t size)
 {
     if (data == NULL || size == 0u || size > sizeof s_tx[0]) return false;
-    uint32_t mask = __get_PRIMASK();
-    __disable_irq();
+    /* Only app_sample produces TX data. Allow priority-0 PWM updates during copy. */
     if (size > sizeof s_tx[0] - s_used) {
         g_uart_stats.tx_rejected++;
-        __set_PRIMASK(mask);
         return false;
     }
     memcpy(s_tx[s_fill] + s_used, data, size);
     s_used += (uint16_t)size;
-    __set_PRIMASK(mask);
     return true;
 }
 

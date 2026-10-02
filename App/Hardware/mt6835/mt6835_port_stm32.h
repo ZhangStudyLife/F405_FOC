@@ -12,7 +12,7 @@ extern volatile uint32_t mt6835_errors;
 extern volatile uint32_t mt6835_timing_fault;
 extern volatile uint32_t mt6835_last_counter;
 
-/* Fixed board: SPI3 mode 3 / 10.5 MHz, PA0 CS, DMA1 streams 0/5 channel 0. */
+/* Fixed board: SPI3 mode 3 / 10.5 MHz, PA0 CS, DMA1 streams 0/7 channel 0. */
 bool mt6835_init(void);
 void mt6835_start(void);
 void mt6835_stop(void);
