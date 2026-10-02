@@ -19,5 +19,13 @@
 #define MOTOR_SPEED_KP 0.1f
 #define MOTOR_SPEED_KI 2.0f
 #define MOTOR_POSITION_KP 4.0f
+/* Experimental speed controller; see App/speed_control.md for measured limits. */
+#define MOTOR_SPEED_REFERENCE_WEIGHT 0.8f
+#define MOTOR_SPEED_ACCEL_RPM_S_A 4685.833948f
+#define MOTOR_OBSERVER_ANGLE_GAIN 600.0f
+#define MOTOR_OBSERVER_SPEED_GAIN 20000.0f
+#define MOTOR_OBSERVER_LOAD_GAIN (-284.545578909f)
+#define MOTOR_COGGING_FULL_RPM 50.0f
+#define MOTOR_COGGING_OFF_RPM 200.0f
 
 #endif

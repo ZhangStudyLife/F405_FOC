@@ -123,7 +123,9 @@ USART2 使用 16 倍过采样和三点多数采样，42 MHz 外设时钟下 1 Mb
 接收使用 128 字节循环 DMA，空闲/半满/全满中断提交数据。
 DMA1 分配：Stream0 编码器 RX、Stream5 UART RX、Stream6 UART TX、Stream7 编码器 TX。
 
-位置误差 × Kp → 速度限幅 → 速度 PI → Iq 限幅 → 电流 PI。
+位置误差 × Kp → 速度限幅 → 增量二自由度速度 PI + 绝对角度前馈 → Iq 限幅 → 电流 PI。
+外环测速使用电流输入的三状态观测器，原生 20 kHz 更新，PI 仍为 1 kHz。
+本版本尚未完成低波动验收，指标、标定来源和主机入口见 [speed_control.md](speed_control.md)。
 20 kHz 多圈位置累计使用补偿求和，避免长时间运行后丢失低速的微小角度增量。
 没有轨迹规划、Studio、CAN 或 USB 运行功能。
 
