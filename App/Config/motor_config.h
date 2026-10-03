@@ -16,8 +16,8 @@
 #define MOTOR_ALIGN_VOLTAGE_V 0.6f
 
 /* Low-speed bench candidate; gains are A/rpm and A/(rpm*s). */
-#define MOTOR_SPEED_KP 0.1f
-#define MOTOR_SPEED_KI 2.0f
+#define MOTOR_SPEED_KP 0.01f
+#define MOTOR_SPEED_KI 0.2f
 #define MOTOR_POSITION_KP 4.0f
 /* Experimental speed controller; see App/speed_control.md for measured limits. */
 #define MOTOR_SPEED_REFERENCE_WEIGHT 0.8f
