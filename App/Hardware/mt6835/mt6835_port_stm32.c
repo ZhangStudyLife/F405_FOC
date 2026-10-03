@@ -26,7 +26,8 @@ static int probe_transfer(uint8_t command, uint8_t value)
 bool mt6835_init(void)
 {
     GPIOA->BSRR = GPIO_PIN_0;
-    HAL_Delay(20u);
+    /* MT6835 TPwrUp is typically 64 ms; do not probe registers earlier. */
+    HAL_Delay(70u);
     int original = probe_transfer(0x30, 0u);
     if (original < 0) return false;
     int written = probe_transfer(0x60, 0x5a);
