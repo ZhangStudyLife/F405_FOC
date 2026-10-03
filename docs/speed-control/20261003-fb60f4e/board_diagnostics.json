@@ -1,0 +1,43 @@
+{
+  "motor_mode": 0,
+  "motor_work_max": 5789,
+  "motor_timing_fault": 0,
+  "adc_errors": 0,
+  "mt6835_errors": 26499,
+  "mt6835_first_error": 512548062,
+  "mt6835_timing_fault": 0,
+  "params": [
+    0.18849556148052216,
+    452.38934326171875,
+    0.009999999776482582,
+    0.20000000298023224,
+    4.0,
+    10.0,
+    100.0
+  ],
+  "uart": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "foc_fault": [
+    -0.2882618308067322,
+    0.03424038365483284,
+    0.26635676622390747,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "first_hex": "1E8CDCDE",
+  "initial_firmware": "Debug current fb60f4e",
+  "firmware_sha256": "9f5a8631ef881d8e03c0a8db9609d03933a6f3aeebb7bacb6e9baba959f9db6a",
+  "parameter_sha256": "a5f395d756a0a3c04c7e826ecd699f221641ae04d908fb260d54c974adc4bab3",
+  "encoder_errors_after_2s": 26499,
+  "current_raw_deg": 62.776737213134766,
+  "current_corrected_deg": 62.776737213134766,
+  "first_status": 4,
+  "first_crc_calculated": 222,
+  "first_crc_received": 222,
+  "first_crc_valid": true
+}

@@ -134,7 +134,7 @@ bool foc_current(float amps)
 
 void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_voltage, float encoder_delay)
 {
-    if (!isfinite(mechanical_deg)) { foc_trip(FOC_SENSOR); return; }
+    if (!isfinite(mechanical_deg)) { foc.angle_step = NAN; foc_trip(FOC_SENSOR); return; }
     float s, c;
     /* This encoder: repeatable second harmonic measured during unpowered coast. */
     sincos_fast(mechanical_deg * (PI / 90.0f), &s, &c);
@@ -143,13 +143,14 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
     if (delta > 180.0f) delta -= 360.0f;
     if (delta < -180.0f) delta += 360.0f;
     if (!tracking) { delta = 0.0f; position = mechanical_deg; position_roundoff = 0.0f; tracking = true; }
-    foc.angle_step = delta;
     /* Allow twice the rated speed, so real overspeed still reaches FOC_SPEED.
        Reject impossible 50 us jumps before Park/feedforward or speed PI sees them. */
     if ((foc.state == FOC_RUN || foc.state == FOC_CALIBRATE || foc.state == FOC_PRECHARGE) &&
         fabsf(delta) > 2.0f * FOC_SPEED_MAX * 6.0f / 20000.0f) {
+        foc.angle_step = NAN;
         foc_trip(FOC_SENSOR); return;
     }
+    foc.angle_step = delta;
     previous = mechanical_deg;
     /* Preserve sub-ULP low-speed motion after many accumulated turns. */
     float increment = delta - position_roundoff;

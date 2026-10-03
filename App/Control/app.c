@@ -48,7 +48,7 @@ static void telemetry(void)
     }
     uint32_t status = foc.state | (foc.fault << 3) | (control.mode << 7) |
         ((uint32_t)foc.zero_ready << 9) | ((uint32_t)foc.calibrated << 10) |
-        ((uint32_t)isfinite(mt6835_raw_deg) << 11) |
+        ((uint32_t)(isfinite(mt6835_raw_deg) && isfinite(foc.angle_step)) << 11) |
         ((uint32_t)(isfinite(frame[0]) && isfinite(frame[1])) << 12) |
         ((uint32_t)(isfinite(frame[9]) && isfinite(frame[10]) && isfinite(frame[3])) << 13) |
         ((uint32_t)foc.zero_fault << 14) | ((uint32_t)foc.zero_complete << 22) |

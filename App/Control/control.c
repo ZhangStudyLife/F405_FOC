@@ -50,7 +50,7 @@ bool control_zero(void)
 
 void control_step(uint32_t sample_us, float mechanical_deg)
 {
-    if (!isfinite(mechanical_deg) || !isfinite(mt6835_raw_deg)) return;
+    if (!isfinite(mechanical_deg) || !isfinite(mt6835_raw_deg) || !isfinite(foc.angle_step)) return;
     if (!tracking) {
         last_deg = mechanical_deg;
         phase_error = 0;

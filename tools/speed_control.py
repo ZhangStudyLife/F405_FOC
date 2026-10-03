@@ -63,13 +63,24 @@ def fit(path):
         travelled -= 6
         turns = np.floor(travelled/360).astype(int)
         assert travelled[-1] >= 1440, "Need four complete turns after entry in both directions"
-        bins = (angle*(512/360)).astype(int) & 511
         per_turn = []
         for turn in range(4):
             mask = turns == turn
-            counts = np.bincount(bins[mask], minlength=512)
+            x = angle[mask]*(512/360)
+            i = x.astype(int) & 511
+            j, fraction = (i+1) & 511, x-i
+            counts = np.bincount(i, minlength=512)
             assert np.all(counts), "Missing angular bins"
-            wave = np.bincount(bins[mask], weights=current[mask], minlength=512)/counts
+            # Fit firmware's actual linear lookup, not bin centres followed by
+            # averaging: that conversion attenuates the repeatable angular orders.
+            normal, rhs = np.zeros((512,512)), np.zeros(512)
+            np.add.at(normal, (i,i), (1-fraction)**2)
+            np.add.at(normal, (j,j), fraction**2)
+            np.add.at(normal, (i,j), fraction*(1-fraction))
+            np.add.at(normal, (j,i), fraction*(1-fraction))
+            np.add.at(rhs, i, (1-fraction)*current[mask])
+            np.add.at(rhs, j, fraction*current[mask])
+            wave = np.linalg.solve(normal, rhs)
             per_turn.append(wave-wave.mean())
             if turn == 3:
                 validation_samples.append((angle[mask], current[mask]-current[mask].mean()))
@@ -84,8 +95,6 @@ def fit(path):
     validation = maps[:, 3]
     before = np.sqrt(np.mean(validation**2, axis=1))
     after = np.sqrt(np.mean((validation-table)**2, axis=1))
-    # LUT samples represent bin centres: shift by half a bin to firmware's angle grid.
-    table = (table + np.roll(table, 1))*.5
     lookup_after = []
     for angle, current in validation_samples:
         x = angle*(512/360)
