@@ -9,6 +9,8 @@ extern volatile float mt6835_angle_deg, mt6835_sample_delay;
    Independent of the speed estimator; still subject to sensor errors. */
 extern volatile float mt6835_raw_deg;
 extern volatile uint32_t mt6835_errors;
+/* First error since boot or the last accepted clear; zero means no error. */
+extern volatile uint32_t mt6835_first_error;
 extern volatile uint32_t mt6835_timing_fault;
 extern volatile uint32_t mt6835_last_counter;
 

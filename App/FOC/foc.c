@@ -10,7 +10,7 @@
 foc_t foc;
 float foc_fault[6];
 static float previous, position, origin, forward, sum_sin, sum_cos, low, high;
-static uint32_t ticks;
+static uint32_t ticks, previous_sample;
 static float integral_d, integral_q, variance_b, variance_c, position_roundoff;
 static bool tracking, aligning;
 
@@ -142,6 +142,7 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
     float delta = mechanical_deg - previous;
     if (delta > 180.0f) delta -= 360.0f;
     if (delta < -180.0f) delta += 360.0f;
+    uint32_t interval = tracking ? (motor_sample_us - previous_sample) & 0xffffffu : 50u;
     if (!tracking) { delta = 0.0f; position = mechanical_deg; position_roundoff = 0.0f; tracking = true; }
     /* Allow twice the rated speed, so real overspeed still reaches FOC_SPEED.
        Reject impossible 50 us jumps before Park/feedforward or speed PI sees them. */
@@ -150,14 +151,17 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         foc.angle_step = NAN;
         foc_trip(FOC_SENSOR); return;
     }
-    foc.angle_step = delta;
+    /* Missing encoder frames have already closed the gates. On recovery,
+       resample the average increment to 50 us; do not feed a whole gap into PLL. */
+    foc.angle_step = delta * (50.0f / (float)interval);
+    previous_sample = motor_sample_us;
     previous = mechanical_deg;
     /* Preserve sub-ULP low-speed motion after many accumulated turns. */
     float increment = delta - position_roundoff;
     float next_position = position + increment;
     position_roundoff = (next_position - position) - increment;
     position = next_position;
-    foc.rpm += 0.01f * (delta * (20000.0f / 6.0f) - foc.rpm);
+    foc.rpm += 0.01f * (foc.angle_step * (20000.0f / 6.0f) - foc.rpm);
     if (!isfinite(b_voltage) || !isfinite(c_voltage)) { foc_trip(FOC_ADC); return; }
     if (!isfinite(encoder_delay) || encoder_delay < 0.0f || encoder_delay > 50e-6f) {
         mt6835_timing_fault = 2u;

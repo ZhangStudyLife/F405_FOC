@@ -10,7 +10,7 @@ volatile float mt6835_angle_deg = NAN, mt6835_sample_delay;
 volatile float mt6835_raw_deg = NAN;
 volatile uint32_t mt6835_errors;
 volatile uint32_t mt6835_timing_fault, mt6835_last_counter;
-volatile uint32_t mt6835_first_error; /* 1: busy, 2: DMA; otherwise raw angle/status/CRC bytes. */
+volatile uint32_t mt6835_first_error; /* 1: busy, 2: DMA, 3: timer; otherwise raw angle/status/CRC bytes. */
 
 /* Initialization only: register 0x001 is user RAM, not a device ID. */
 static int probe_transfer(uint8_t command, uint8_t value)

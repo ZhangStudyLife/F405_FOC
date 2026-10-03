@@ -46,13 +46,15 @@ void bsp_motor_init(void)
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
     /* APB1 timer clock is 84 MHz. TIM5 is dedicated to acquisition timestamps. */
     __HAL_RCC_TIM5_CLK_ENABLE();
-    TIM5->CR1 = 0u;
-    TIM5->PSC = 83u;
-    TIM5->ARR = 0xffffffffu;
-    TIM5->EGR = TIM_EGR_UG;
-    TIM5->CNT = 0u;
+    /* Acquisition restarts must not rewind encoder/outer-loop timestamps. */
+    if (!(TIM5->CR1 & TIM_CR1_CEN)) {
+        TIM5->PSC = 83u;
+        TIM5->ARR = 0xffffffffu;
+        TIM5->EGR = TIM_EGR_UG;
+        TIM5->CNT = 0u;
+        TIM5->CR1 = TIM_CR1_CEN;
+    }
     DBGMCU->APB1FZ |= DBGMCU_APB1_FZ_DBG_TIM5_STOP;
-    TIM5->CR1 = TIM_CR1_CEN;
     /* UG loads RCR=1 at CNT=0: overflow counts down, underflow latches CCRs.
        Force CH4 low before toggle mode so rising trigger is on the up-count. */
     TIM8->CR1 = TIM_CR1_CMS_0 | TIM_CR1_ARPE;

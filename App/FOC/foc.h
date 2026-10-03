@@ -31,6 +31,7 @@ typedef struct {
     foc_calibration_t calibration;
     float duty[3], ud, uq, command, iq_ref, id, iq, electrical_deg, rpm;
     float b_offset, c_offset, angle_step, b_std_mv, c_std_mv;
+    /* angle_step: protected increment per nominal 50 us; NaN on invalid input. */
     volatile uint32_t state, fault;
     uint8_t zero_fault;
     bool calibrated, zero_ready, zero_complete;

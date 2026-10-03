@@ -1,0 +1,51 @@
+{
+  "motor_mode": 0,
+  "motor_work_max": 3765,
+  "motor_timing_fault": 0,
+  "adc_errors": 0,
+  "mt6835_errors": 0,
+  "mt6835_first_error": 0,
+  "mt6835_timing_fault": 0,
+  "params": [
+    0.18849556148052216,
+    452.38934326171875,
+    0.00800000037997961,
+    0.15000000596046448,
+    4.0,
+    10.0,
+    100.0
+  ],
+  "foc_fault": [
+    null,
+    null,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "uart": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "first_hex": null,
+  "first_status": null,
+  "first_crc_calculated": null,
+  "first_crc_received": null,
+  "first_crc_valid": null,
+  "firmware": "Debug bb14305",
+  "firmware_sha256": "2a85ff7aca8911b68d1a1e3fa6ec019e2324aecbc3e58adbdf502948d679f876",
+  "parameter_sha256": "4c42b4addb5f00139fb1b3d394466c57166e72d2ccf6eaf4839cc427058c38c6",
+  "mt_raw_deg": 10.573654174804688,
+  "foc_rpm": 3.5975898909218484e-13,
+  "snapshot_context": "用户在本轮13:14~13:17重启之后；不是CSV中的首个编码器故障现场。",
+  "state": 5,
+  "fault": 9,
+  "zero_fault": 8,
+  "calibrated": 0,
+  "zero_ready": 0,
+  "zero_complete": 1,
+  "b_std_mV": 3.8334555625915527,
+  "c_std_mV": 4.03903865814209
+}

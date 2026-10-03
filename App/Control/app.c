@@ -152,6 +152,7 @@ bool app_command(const char *line)
              fabsf(adc_sample.b_voltage + adc_sample.c_voltage - foc.b_offset - foc.c_offset) < 0.04f));
         if (valid) {
             motor_timing_fault = mt6835_timing_fault = 0u;
+            mt6835_first_error = 0u; /* Capture the next fault after an explicit clear. */
             foc.fault = FOC_OK;
             if (foc.zero_ready) foc.state = FOC_IDLE;
             else {
