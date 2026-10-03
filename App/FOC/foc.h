@@ -29,7 +29,7 @@ enum { FOC_OK, FOC_SENSOR, FOC_ADC, FOC_TIMING, FOC_WINDOW, FOC_ALIGNMENT,
 typedef struct { float zero; int32_t direction; } foc_calibration_t;
 typedef struct {
     foc_calibration_t calibration;
-    float duty[3], ud, uq, command, iq_ref, id, iq, electrical_deg, rpm;
+    float duty[3], ud, uq, command, iq_ref, id_ref, id, iq, electrical_deg, rpm;
     float b_offset, c_offset, angle_step, b_std_mv, c_std_mv;
     /* angle_step: protected increment per nominal 50 us; NaN on invalid input. */
     volatile uint32_t state, fault;
@@ -41,7 +41,7 @@ extern foc_t foc; /* ISR-owned; foreground changes require a short IRQ critical 
 extern float foc_fault[6];
 
 void foc_init(const foc_calibration_t *calibration);
-bool foc_current(float amps); /* Torque target, slewed by current_ramp; zero does not start. */
+bool foc_current(float amps); /* Slewed torque target; zero starts only for active music. */
 bool foc_calibrate(void);
 void foc_stop(void);
 void foc_trip(uint32_t fault);

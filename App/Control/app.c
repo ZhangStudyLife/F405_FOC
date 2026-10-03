@@ -3,6 +3,7 @@
 #include "bsp_motor.h"
 #include "bsp_uart.h"
 #include "control.h"
+#include "music.h"
 #include "mt6835_port_stm32.h"
 #include "stm32f4xx_hal.h"
 #include <math.h>
@@ -12,7 +13,7 @@ static unsigned telemetry_divider;
 static volatile uint32_t last_sample;
 static volatile uint32_t command_count, command_result;
 static uint32_t last_command_ms;
-enum { UNKNOWN, STOP, CLEAR, CAL, ZERO, TORQUE, SPEED, POSITION, SET_PARAM, SAVE };
+enum { UNKNOWN, STOP, CLEAR, CAL, ZERO, TORQUE, SPEED, POSITION, SET_PARAM, SAVE, MUSIC_PLAY, MUSIC_STOP };
 
 bool app_init(void)
 {
@@ -117,6 +118,8 @@ bool app_command(const char *line)
     else if (!strcmp(line, "cal")) command = CAL;
     else if (!strcmp(line, "zero")) command = ZERO;
     else if (!strcmp(line, "save")) command = SAVE;
+    else if (!strcmp(line, "music play")) command = MUSIC_PLAY;
+    else if (!strcmp(line, "music stop")) command = MUSIC_STOP;
     else if (!strncmp(line, "iq ", 3)) { command = TORQUE; valid = parse_decimal(line + 3, &value); }
     else if (!strncmp(line, "rpm ", 4)) { command = SPEED; valid = parse_decimal(line + 4, &value); }
     else if (!strncmp(line, "pos ", 4)) { command = POSITION; valid = parse_decimal(line + 4, &value); }
@@ -142,6 +145,15 @@ bool app_command(const char *line)
     uint32_t key = bsp_motor_lock();
     if (valid) switch (command) {
     case STOP: bsp_motor_off(); foc_stop(); break;
+    case MUSIC_PLAY:
+        valid = MUSIC_ENABLE && foc.calibrated && foc.zero_ready &&
+            (foc.state == FOC_IDLE || foc.state == FOC_RUN);
+        if (valid) {
+            music_play();
+            if (foc.state == FOC_IDLE) valid = foc_current(0.0f);
+        }
+        break;
+    case MUSIC_STOP: music_stop(); foc.id_ref = 0.0f; break;
     case CLEAR:
         valid = foc.state == FOC_FAULT && HAL_GetTick() - last_sample < 2u &&
             isfinite(mt6835_angle_deg) && isfinite(adc_sample.b_voltage) && isfinite(adc_sample.c_voltage) &&

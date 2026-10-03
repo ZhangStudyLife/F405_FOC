@@ -1,6 +1,7 @@
 #include "foc.h"
 #include "bsp_motor.h" /* motor_sample_us: the sample-phase timestamp. */
 #include "control.h"
+#include "music.h"
 #include <math.h>
 #include "mt6835_port_stm32.h"
 #include <string.h>
@@ -71,7 +72,8 @@ bool foc_window(const float duty[3])
 
 void foc_stop(void)
 {
-    foc.command = foc.iq_ref = foc.ud = foc.uq = 0.0f;
+    music_stop();
+    foc.command = foc.iq_ref = foc.id_ref = foc.ud = foc.uq = 0.0f;
     integral_d = integral_q = 0.0f;
     aligning = false;
     foc.duty[0] = foc.duty[1] = foc.duty[2] = 0.0f;
@@ -97,6 +99,8 @@ bool foc_calibrate(void)
 {
     if (foc.state != FOC_IDLE || !foc.zero_ready || fabsf(foc.rpm) >= 5.0f) return false;
     aligning = true;
+    music_stop();
+    foc.id_ref = 0.0f;
     foc.calibrated = false; /* An interrupted/failed attempt must not permit RUN. */
     integral_d = integral_q = 0.0f;
     position = previous; /* Keep alignment deltas precise after many revolutions. */
@@ -108,6 +112,7 @@ bool foc_calibrate(void)
 
 void foc_init(const foc_calibration_t *calibration)
 {
+    music_stop();
     /* Current reinitialization must preserve encoder feedback and accumulation. */
     foc = (foc_t){.rpm = foc.rpm, .angle_step = foc.angle_step,
                   .id = NAN, .iq = NAN, .state = FOC_OFFSET};
@@ -123,7 +128,7 @@ bool foc_current(float amps)
     if (!isfinite(amps) || fabsf(amps) > FOC_CURRENT_MAX) return false;
     if (!foc.calibrated || !foc.zero_ready || (foc.state != FOC_IDLE && foc.state != FOC_RUN)) return false;
     foc.command = amps;
-    if (foc.state == FOC_IDLE && amps != 0.0f) {
+    if (foc.state == FOC_IDLE && (amps != 0.0f || music_active())) {
         aligning = false;
         integral_d = integral_q = foc.iq_ref = 0.0f;
         ticks = 0u;
@@ -237,7 +242,8 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         } else ticks = 0u;
         /* 600 Hz PI, R=.12 ohm, L=50 uH; no feedback low-pass.
            Back calculation Tt=L/R. Feedforward uses nominal motor parameters. */
-        float ed = -foc.id, eq = foc.iq_ref - foc.iq;
+        foc.id_ref = music_step(foc.iq_ref);
+        float ed = foc.id_ref - foc.id, eq = foc.iq_ref - foc.iq;
         float ud = motor_params.current_kp * ed + integral_d - omega * MOTOR_INDUCTANCE_H * foc.iq;
         float uq = motor_params.current_kp * eq + integral_q + omega * (MOTOR_INDUCTANCE_H * foc.id + MOTOR_FLUX_WB);
         /* Predict to next PWM centre (next valley + 25 us). At <=8600 RPM,

@@ -17,6 +17,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/Control/app.c
     App/Control/control.c
     App/FOC/foc.c
+    App/Music/music.c
     App/Hardware/bsp/bsp_motor.c
     App/Hardware/bsp/bsp_adc.c
     App/Hardware/bsp/bsp_uart.c
@@ -27,13 +28,14 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     App/Control
     App/Config
     App/FOC
+    App/Music
     App/Hardware/bsp
     App/Hardware/mt6835
 )
 target_link_libraries(${CMAKE_PROJECT_NAME} stm32cubemx m)
 # Keep the 20 kHz path optimized in Debug too; -O0 misses PWM deadlines.
 set_source_files_properties(
-    App/FOC/foc.c App/Hardware/bsp/bsp_motor.c App/Hardware/bsp/bsp_uart.c
+    App/FOC/foc.c App/Music/music.c App/Hardware/bsp/bsp_motor.c App/Hardware/bsp/bsp_uart.c
     App/Control/app.c App/Control/control.c App/Hardware/bsp/bsp_adc.c
     App/Hardware/mt6835/mt6835.c App/Hardware/mt6835/mt6835_port_stm32.c
     PROPERTIES COMPILE_OPTIONS "-O3")
