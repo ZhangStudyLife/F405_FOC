@@ -301,5 +301,5 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
 
 void foc_outer_step(void)
 {
-    control_step(motor_sample_us, position, previous);
+    control_step(motor_sample_us, position);
 }

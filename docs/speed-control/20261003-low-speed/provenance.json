@@ -1,0 +1,61 @@
+{
+  "sources": [
+    {
+      "path": "D:\\Downloads\\8fdcc3d电机日志.csv",
+      "bytes": 20617982,
+      "sha256": "94f02aa5dd6034c3785014f56e1290d8da1707d035d599377c9106d653228d3c"
+    },
+    {
+      "path": "E:\\405_FOC\\405_FOC\\build\\bench_debug\\20261003_102900\\before.csv",
+      "bytes": 34639478,
+      "sha256": "9e5a73e3a5d854cd060b53073d2b2a6b6290c98f9f7634fc70400b2d67765068"
+    },
+    {
+      "path": "E:\\405_FOC\\405_FOC\\build\\bench_debug\\20261003_102900\\pll.csv",
+      "bytes": 13278281,
+      "sha256": "6a886bab2a9aa419de162070c8bd1ab5c6d7aa2bea8698d2f5ad6e7340e16997"
+    },
+    {
+      "path": "E:\\405_FOC\\405_FOC\\build\\bench_debug\\20261003_102900\\before.csv",
+      "bytes": 34639478,
+      "sha256": "9e5a73e3a5d854cd060b53073d2b2a6b6290c98f9f7634fc70400b2d67765068"
+    },
+    {
+      "path": "E:\\405_FOC\\405_FOC\\build\\bench_debug\\20261003_102900\\pll_rest.csv",
+      "bytes": 15398490,
+      "sha256": "0f166ea0b079043b057493c0edf8b35514732313063754f3b05367c1b83c829f"
+    },
+    {
+      "path": "E:\\405_FOC\\405_FOC\\build\\bench_debug\\20261003_102900\\locked_before.csv",
+      "bytes": 465,
+      "sha256": "ae3c3c05203eccf8691be06d00f5a227a12f36080ac4d5e00c0f136dbcc218a2"
+    },
+    {
+      "path": "E:\\405_FOC\\405_FOC\\build\\bench_debug\\20261003_102900\\locked_after.csv",
+      "bytes": 465,
+      "sha256": "a205b5f50b4023f38bc617aec710f9939dfcb34adb975858408cc44c8c031582"
+    },
+    {
+      "path": "E:\\405_FOC\\405_FOC\\build\\bench_debug\\20261003_102900\\before_steps.bin",
+      "bytes": 114688,
+      "sha256": "81409347daffe865feded615a85b2a1e75e5a9ca86b5a07d89a4412dc92a2575"
+    },
+    {
+      "path": "E:\\405_FOC\\405_FOC\\build\\bench_debug\\20261003_102900\\slew_transient_50.bin",
+      "bytes": 90468,
+      "sha256": "091b9c38d1a2d9d623e89cb25bbccab3ceeecf3ffdcbbda3db95f581147a7109"
+    }
+  ],
+  "transient": [
+    {
+      "source": "before_steps",
+      "iq_target_peak_A": 2.0,
+      "raw_speed_peak_rpm": 88.48824310302734
+    },
+    {
+      "source": "slew_transient_50",
+      "iq_target_peak_A": 1.5600000619888306,
+      "raw_speed_peak_rpm": 70.8178482055664
+    }
+  ]
+}

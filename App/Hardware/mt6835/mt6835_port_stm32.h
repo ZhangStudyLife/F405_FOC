@@ -6,7 +6,7 @@
 
 extern volatile float mt6835_angle_deg, mt6835_sample_delay;
 /* Decoded angle before the second-harmonic correction applied inside foc.c.
-   Encoder ground truth for offline comparison against any estimator. */
+   Independent of the speed estimator; still subject to sensor errors. */
 extern volatile float mt6835_raw_deg;
 extern volatile uint32_t mt6835_errors;
 extern volatile uint32_t mt6835_timing_fault;

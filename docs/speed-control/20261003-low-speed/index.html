@@ -1,0 +1,217 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>FOC 低速停转误报修复与原始角度对照</title><style>body{margin:0;background:#f5f4ef;color:#26343d;font:17px/1.85 Georgia,"Microsoft YaHei",serif}main{max-width:1120px;margin:40px auto;padding:48px 56px;background:white;border-top:5px solid #174b73}h1{font-size:32px;line-height:1.4}h2{margin-top:56px;padding-bottom:8px;border-bottom:1px solid #bbc8cd;font-size:24px}a{color:#174b73}img{display:block;max-width:100%;height:auto;margin:32px auto}table{border-collapse:collapse;display:block;overflow:auto;width:100%;font:14px/1.6 "Microsoft YaHei",sans-serif}th,td{padding:10px 12px;text-align:left;border-bottom:1px solid #ccd6da}th{background:#eef3f6}pre{overflow:auto;background:#f1f4f5;padding:20px;font:14px/1.8 Consolas,monospace}code{overflow-wrap:anywhere;font-size:.85em}footer{margin-top:50px;font-size:14px;color:#59656e}@media(max-width:750px){main{margin:0;padding:24px 18px}h1{font-size:25px}}@media print{body{background:white}main{padding:0;margin:0}h2{break-after:avoid}img{break-inside:avoid}a{color:inherit}}</style><main><h1>低速停转误报修复与原始角度验收（2026-10-03）</h1>
+<p><strong>结论：确认并修复旧测速器的停转误报；低速运动连续性改善。整体低波动和启停验收尚未通过。</strong></p>
+<p>本轮 10:29 开始，使用同一圆柱负载、电池供电、COM14 与 ST-Link。各运行对照临时限制 Iq 为 2 A；交付固件恢复原有 8 A 上限，保持全部保护。不能把 2 A 测试当作 8 A 全工况验收。</p>
+<h2>1. 用户日志直接证明了什么</h2>
+<p>原文件 <code>D:\Downloads\8fdcc3d电机日志.csv</code> 保持只读，共 103,958 帧。I0～I19 按当前固定 20 通道协议解释。全部故障码为 0。CSV 没有 MCU 时间戳或人工施加载荷标记，以下时间由帧号 / 500 Hz 换算，不能认定准确的手动负载起止时刻。</p>
+<table>
+<thead>
+<tr>
+<th>代表窗口</th>
+<th style="text-align:right">目标</th>
+<th style="text-align:right">回传平均速度</th>
+<th style="text-align:right">原始角度净行程换算速度</th>
+<th>完整 Iq 目标</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>行 11489～11613，约 22.978～23.226 s</td>
+<td style="text-align:right">10 rpm</td>
+<td style="text-align:right">9.876 rpm</td>
+<td style="text-align:right">0.216 rpm</td>
+<td>末值约 0.366 A</td>
+</tr>
+<tr>
+<td>行 55027～55445，约 110.054～110.890 s</td>
+<td style="text-align:right">30 rpm</td>
+<td style="text-align:right">29.265 rpm</td>
+<td style="text-align:right">0.383 rpm</td>
+<td>0.258 → 1.446 A</td>
+</tr>
+</tbody>
+</table>
+<p>行号为从零开始的数据行，不含表头。第二段原始角度几乎停住，速度回传却接近目标，电流仍不断增加。原始角度有微小运动，不能写成精确零速；但差异远超过正常测速延迟。</p>
+<p><img src="user-load-evidence.svg" alt="用户日志原始角度、速度回传与完整电流目标" /></p>
+<p>完整 SHA256：<code>94f02aa5dd6034c3785014f56e1290d8da1707d035d599377c9106d653228d3c</code>。窗口筛选和文件信息见 <a href="user_log_analysis.json">user_log_analysis.json</a>。这些片段用于定位异常，不能替代全部稳态记录的验收统计。</p>
+<h2>2. 为什么旧观测器会报出接近目标的速度</h2>
+<p>旧代码是固定增益的角度 / 速度 / 负载三状态观测器，实际 Iq 驱动速度预测，编码器残差校正三个状态。它没有实现论文的自适应 Kalman 协方差更新。</p>
+<p>固定真实角度时，速度 PI 仍累加电流；观测器把不断增加的电流与缓慢变化的负载估计配合起来，可以维持非零的内部速度。固定角度、理想电流跟踪的真实 C 控制模块复现得到 <strong>目标 10 rpm、回传约 9.782 rpm</strong>，而原始角度始终不动。这是软件复现，不是人工堵转实机测试。</p>
+<p>旧参数满足近似准稳态关系：<code>c = -6·Lload/Lθ = 0.04446025 A/(s·rpm)</code>，<code>v估计 ≈ Ki·r/(Ki+c)</code>；Ki=2 时，r=10 得到 9.7825 rpm。用户 30 rpm 窗口的 Iq 增长斜率约 1.310 A/s，与 <code>c·29.265 ≈ 1.301 A/s</code> 接近。它解释了异常机制；不证明机械负载模型在所有工况都成立。</p>
+<p>因此，之前仅基于这个观测器输出计算的“低速度波动”不能作为运动平稳的证据；高速电流统计仍是真实电流目标统计，但不能单独证明跟随能力合格。</p>
+<p><img src="fixed-angle-reproduction.svg" alt="固定角度软件复现" /></p>
+<h2>3. 修改前后算法</h2>
+<pre><code class="language-text">旧：实际 Iq ─→ 三状态角度/速度/负载预测 ─→ 速度估计
+                 ↑ 编码器角度残差             ↓
+目标 ─────────────────────────────→ 二自由度速度 PI
+原始绝对角度 ─→ 512 点前馈 ───────→ 相加 → 幅值限幅 → 电流环
+                                            └→ 反算抗饱和
+
+新：受保护的编码器角度增量 ─→ 两状态 PLL ─→ 速度反馈
+目标 ─────────────────────────────→ 二自由度速度 PI
+原始绝对角度 ─→ 同一 512 点前馈 ───→ 相加 → 幅值限幅
+                                               ↓
+                                      完整目标限变率 → 电流环
+                                               └→ 统一反算抗饱和
+</code></pre>
+<p>PLL 使用相对相位误差，避免多圈或大绝对角度下的浮点舍入；不使用目标或 Iq 预测速度。结构参考 <a href="https://github.com/odriverobotics/ODrive/blob/3a2e4dd1bfbda9e4c534d5c7d8428a99c361e783/Firmware/MotorControl/encoder.cpp">ODrive 编码器 PLL</a> 与 <a href="https://github.com/mjbots/moteus/blob/8f747f4ac448d117c1390b77ca2d80c27e751a56/fw/motor_position.h">moteus</a>。本机实验值为自然频率 2000 rad/s、临界阻尼；自然频率不是直接等同于测得闭环带宽。</p>
+<p>完整 Iq 目标限制为每次实际外环时间差乘以 <strong>120 A/s</strong>，加入前馈后统一约束，抗饱和追踪这个最终目标。120 A/s 是本机实验值，不是文献规定值。停机和故障仍直接关闭功率，不经过斜坡。</p>
+<p>使用最终输出进行积分跟踪参考 <a href="https://www.mathworks.com/help/simulink/slref/anti-windup-control-using-a-pid-controller.html">MathWorks 抗饱和说明</a>。<a href="https://docs.odriverobotics.com/v/latest/manual/control.html">ODrive 控制文档</a>说明参考轨迹和斜坡对运动冲击的处理，但不能证明本机响应已经达标。</p>
+<p>电流环 20 kHz、外环约 1 kHz、20 通道 / 500 Hz / 84 字节、速度 Kp=0.1 / Ki=2、β=0.8、512 点表和 50～200 rpm 退出区间保留。没有重新标定或进行补偿开关对照，不能把改善单独归功于抗齿槽表，也不能称该表已优化完成。</p>
+<h2>4. 同台架低速结果：用原始角度判断</h2>
+<p>下表为 <strong>仅替换 PLL、尚未加入限变率</strong> 的完整稳态记录。进入后排除 2 s；按同一方法对通道 8 解缠，采用 25 点三阶 Savitzky–Golay 导数（500 Hz），求速度标准差。这个离线导数与控制反馈独立，但仍受编码器误差和采样限制影响。Iq 使用最终完整目标，未额外滤波或减去前馈。</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">目标 rpm</th>
+<th style="text-align:right">旧原始角度速度 σ / rpm</th>
+<th style="text-align:right">PLL 原始角度速度 σ / rpm</th>
+<th style="text-align:right">旧完整 Iq σ / A</th>
+<th style="text-align:right">PLL 完整 Iq σ / A</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right">+1</td>
+<td style="text-align:right">5.7673</td>
+<td style="text-align:right">0.0633</td>
+<td style="text-align:right">0.0724</td>
+<td style="text-align:right">0.1514</td>
+</tr>
+<tr>
+<td style="text-align:right">−1</td>
+<td style="text-align:right">5.7357</td>
+<td style="text-align:right">0.0786</td>
+<td style="text-align:right">0.0720</td>
+<td style="text-align:right">0.1465</td>
+</tr>
+<tr>
+<td style="text-align:right">+5</td>
+<td style="text-align:right">12.9412</td>
+<td style="text-align:right">0.1477</td>
+<td style="text-align:right">0.0943</td>
+<td style="text-align:right">0.1468</td>
+</tr>
+<tr>
+<td style="text-align:right">−5</td>
+<td style="text-align:right">12.0996</td>
+<td style="text-align:right">0.1450</td>
+<td style="text-align:right">0.0804</td>
+<td style="text-align:right">0.1482</td>
+</tr>
+<tr>
+<td style="text-align:right">+10</td>
+<td style="text-align:right">17.0087</td>
+<td style="text-align:right">0.2009</td>
+<td style="text-align:right">0.1104</td>
+<td style="text-align:right">0.1496</td>
+</tr>
+<tr>
+<td style="text-align:right">−10</td>
+<td style="text-align:right">16.8045</td>
+<td style="text-align:right">0.2002</td>
+<td style="text-align:right">0.1118</td>
+<td style="text-align:right">0.1475</td>
+</tr>
+<tr>
+<td style="text-align:right">+50</td>
+<td style="text-align:right">10.9825</td>
+<td style="text-align:right">0.7592</td>
+<td style="text-align:right">0.0627</td>
+<td style="text-align:right">0.1950</td>
+</tr>
+</tbody>
+</table>
+<p>PLL 的 ±1 rpm 稳态原始行程分别约 +408.05°、−407.84°，覆盖完整一圈，平均速度约 +0.99998 / −0.99946 rpm。旧 +1 rpm 的 100 ms 行程低于目标 10% 的最长连续段为 2.528 s；PLL 的 ±1/5/10 rpm 同一定义下未出现这些连续段。该指标叫“低进展段”，并不等同于外部传感器确认的绝对停转。</p>
+<p><strong>电流波动增加这一点必须保留。</strong> 新反馈让原先被隐藏的走停问题得到纠正，但总 Iq 标准差约 0.15 A。低速前馈和真实周期转矩也会贡献电流变化；尚未做开关对照，不能据此准确拆分来源，更不能把补偿从总电流中扣除宣称低波动通过。</p>
+<p><img src="low-speed-comparison.svg" alt="全部 ±1 rpm 稳态前后对照" /></p>
+<p>原始统计见 <a href="before.metrics.json">before.metrics.json</a>、<a href="pll.metrics.json">pll.metrics.json</a>、<a href="pll_rest.metrics.json">pll_rest.metrics.json</a>。</p>
+<h2>5. 起步限变率证据与限制</h2>
+<p>PLL-only 的 −50 rpm 起步曾出现 Iq 目标在数毫秒内负饱和、转正、再负饱和，随后编码器欠压保护。加入完整目标限变率后，完成一次 ±50 rpm 起步 / 归零序列，随后 +100 rpm 起步又触发欠压。</p>
+<p>下面仅比较一次 +50 rpm 起步，原生 SRAM 约 1 kHz 采样、MCU 时间对齐。两次起始机械角度不同，不能据此验证响应时间增加不超过 10%。旧样本从已保存的故障 SRAM 提取，提取时没有运行或修改板子。</p>
+<p><img src="startup-comparison.svg" alt="单次起步对照" /></p>
+<p>所绘窗口旧 / 新 Iq 峰值为 2.00 / 1.56 A，原始角度速度峰值约 88.49 / 70.82 rpm；新方案仍有起步振铃和电流换向。不能写成冲击消除。1 kHz 记录与实际 PI 更新不完全同步，单个记录间隔的电流斜率可能超过名义 120 A/s；临时 C 检查按实际更新 dt 验证了约束。</p>
+<h2>6. 欠压故障与停机</h2>
+<table>
+<thead>
+<tr>
+<th>固件变体 / 工况</th>
+<th>首个编码器返回（含有效 CRC）</th>
+<th style="text-align:right">编码器错误累计</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>旧观测器，+1000→−1000 rpm</td>
+<td><code>68 09 84 BC</code>，状态 4</td>
+<td style="text-align:right">108</td>
+<td>保护停机</td>
+</tr>
+<tr>
+<td>PLL-only，−50 rpm 起步</td>
+<td><code>14 66 A4 F7</code>，状态 4</td>
+<td style="text-align:right">41</td>
+<td>保护停机</td>
+</tr>
+<tr>
+<td>PLL + 限变率，+100 rpm 起步</td>
+<td><code>2D 34 BC 42</code>，状态 4</td>
+<td style="text-align:right">122</td>
+<td>保护停机</td>
+</tr>
+</tbody>
+</table>
+<p>状态 4 为 MT6835 欠压告警。三次故障现场 ADC、PWM/编码器时序与 UART 错误计数均为 0；工作最大计数 5637 / 5322 / 4918 个 168 MHz tick（约 33.55 / 31.68 / 29.27 μs），包含临时采集开销。</p>
+<p>用户两次报告重启后，均先确认停机、编码器数据有效、错误计数稳定再恢复一次。第三次复现后不再清错运行。没有测量编码器芯片 VDD 瞬态，不能判断具体供电或接线根因；ST-Link 的 MCU 电压不能替代这项测量。</p>
+<h2>7. 交付与验收状态</h2>
+<p>Debug / Release 构建通过；实际控制模块临时 C 检查通过：固定角度拒绝目标 / 电流造成的假速度，正负角度速度跟踪，正负方向电流幅值 / 限变率，立即 stop。临时 SRAM 与注入代码已从正式源码移除。</p>
+<p>正式 Release 已烧录并逐字节回读一致，共 <strong>37,936 字节</strong>：</p>
+<ul>
+<li>固件 SHA256：<code>ab4079c814ced07c323a0ac21e65afc72206b8366fcf9c99d9d52cddca543b26</code>。</li>
+<li>Flash 参数 / 校准区 0x080C0000～0x080FFFFF 与本轮开始备份逐字节一致；SHA256：<code>09cd6506b6dab9c676d5aabb47e16a80afbc4fea465c8e7c0970b5d8593c6f08</code>。</li>
+<li>最终 stop 确认：fault=0、power_on=0、速度 / 目标=0；母线 23.316 V；零偏标准差 B/C=3.165 / 3.351 mV，符合现有 4 mV 判据。</li>
+<li>正式 8 A 固件仅完成停机链路验证，没有在欠压根因未确定时重启带电测试。</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>项目</th>
+<th>本轮结论</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>停转误报机制与代码修复</td>
+<td>日志、固定角度 C 复现支持；需补实际负载停转复核</td>
+</tr>
+<tr>
+<td>低速运动连续性</td>
+<td>PLL-only 的 ±1/5/10 rpm 对照改善；最终组合待完整圈复测</td>
+</tr>
+<tr>
+<td>高速总 Iq σ≤0.02 A</td>
+<td>未覆盖新 PLL，不能沿用旧观测器成绩</td>
+</tr>
+<tr>
+<td>阶跃 / 反转响应余量 10%</td>
+<td>未完成；部分起步和反转欠压失败</td>
+</tr>
+<tr>
+<td>抗齿槽新标定 / 关开对照</td>
+<td>未完成，表保持原值</td>
+</tr>
+<tr>
+<td>最终十次复位 / 完整 300 s 波形 / 位置环验收</td>
+<td>未完成</td>
+</tr>
+<tr>
+<td>声压、机械振动、温升</td>
+<td>无仪器，未测</td>
+</tr>
+</tbody>
+</table>
+<h2>8. 复现与后续工作</h2>
+<p>原始 CSV / UART / SRAM、每个测试变体 ELF / BIN、命令事件、首故障与停机证据保存在 <code>E:\405_FOC\405_FOC\build\bench_debug\20261003_102900</code>。图表使用 NumPy / SciPy / Matplotlib 渲染，SVG / PDF / PNG 同时交付；输入文件哈希见 <a href="provenance.json">provenance.json</a>。</p>
+<p>后续先定位编码器欠压，再对最终组合做完整低速圈、实际负载停转检查和补偿开关对照。联合测速带宽与 PI 的频率响应整定参考 <a href="https://arxiv.org/html/2202.08648v1">Ramos Garces 等</a>。本轮没有新完整激励数据和相干性，因此不生成冒充实测的 Bode / 稳定裕量图。抗齿槽须在不振荡的基础控制器上标定，参考 <a href="https://docs.odriverobotics.com/v/latest/guides/anticogging.html">ODrive 官方说明</a>。</p>
+<p>本轮截至归档用时约 58.4 分钟，受控运行命令保持时间合计 478.6 秒（7.98 分钟；不包含预充和停机滑行，不等同于精确门极通电时长）。最终烧录及停机证据见 <a href="final_verified.json">final_verified.json</a>。</p>
+<footer>图表：NumPy / SciPy / Matplotlib。附带 SVG、PNG、PDF 和输入哈希。<br><a href="README.md">原始报告 Markdown</a> · <a href="../index.html">历史算法报告（已更正验收解释）</a></footer></main></html>

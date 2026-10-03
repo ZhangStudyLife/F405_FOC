@@ -21,10 +21,9 @@
 #define MOTOR_POSITION_KP 4.0f
 /* Experimental speed controller; see App/speed_control.md for measured limits. */
 #define MOTOR_SPEED_REFERENCE_WEIGHT 0.8f
-#define MOTOR_SPEED_ACCEL_RPM_S_A 4685.833948f
-#define MOTOR_OBSERVER_ANGLE_GAIN 75.0f
-#define MOTOR_OBSERVER_SPEED_GAIN 312.5f
-#define MOTOR_OBSERVER_LOAD_GAIN (-0.555753084f)
+#define MOTOR_SPEED_PLL_RAD_S 2000.0f
+/* Bench candidate; startup tests are blocked by encoder undervoltage. */
+#define MOTOR_SPEED_IQ_SLEW_A_S 120.0f
 #define MOTOR_COGGING_FULL_RPM 50.0f
 #define MOTOR_COGGING_OFF_RPM 200.0f
 

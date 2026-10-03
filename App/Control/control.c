@@ -8,7 +8,7 @@ control_t control;
 static const float cogging[512] = {
 #include "cogging_table.inc"
 };
-static float integral, last_p, last_deg, estimated_angle, estimated_load;
+static float integral, last_p, last_deg, phase_error;
 static uint32_t previous_tick;
 static bool tracking;
 
@@ -48,31 +48,21 @@ bool control_zero(void)
     return true;
 }
 
-void control_step(uint32_t sample_us, float mechanical_deg, float wrapped_deg)
+void control_step(uint32_t sample_us, float mechanical_deg)
 {
     if (!isfinite(mechanical_deg) || !isfinite(mt6835_raw_deg)) return;
     if (!tracking) {
         last_deg = mechanical_deg;
-        estimated_angle = wrapped_deg;
-        estimated_load = 0;
+        phase_error = 0;
         control.speed = foc.rpm;
         tracking = true;
     }
-    /* Position/speed/load observer. Current input predicts genuine acceleration;
-       encoder correction acts on all states without differentiating its noise.
-       Keep the protected, corrected angle on the native 20 kHz path. */
-    float amps = isfinite(foc.iq) ? (float)foc.calibration.direction * foc.iq : 0.0f;
-    float acceleration = MOTOR_SPEED_ACCEL_RPM_S_A * (amps - estimated_load);
-    estimated_angle += 0.0003f * control.speed + 7.5e-9f * acceleration;
-    control.speed += 5e-5f * acceleration;
-    float residual = wrapped_deg - estimated_angle;
-    if (residual > 180.0f) residual -= 360.0f;
-    else if (residual < -180.0f) residual += 360.0f;
-    estimated_angle += MOTOR_OBSERVER_ANGLE_GAIN * 5e-5f * residual;
-    control.speed += MOTOR_OBSERVER_SPEED_GAIN * 5e-5f * residual;
-    estimated_load += MOTOR_OBSERVER_LOAD_GAIN * 5e-5f * residual;
-    if (estimated_angle >= 360.0f) estimated_angle -= 360.0f;
-    else if (estimated_angle < 0.0f) estimated_angle += 360.0f;
+    /* Critically damped encoder PLL: kp=2*w, ki=w*w. Keep its angle error
+       relative to the protected encoder increment to avoid float roundoff
+       at large absolute angles. Neither target nor current predicts speed. */
+    phase_error += foc.angle_step - 0.0003f * control.speed;
+    control.speed += MOTOR_SPEED_PLL_RAD_S * MOTOR_SPEED_PLL_RAD_S * (5e-5f / 6.0f) * phase_error;
+    phase_error *= 1.0f - 2.0f * MOTOR_SPEED_PLL_RAD_S * 5e-5f;
     uint32_t elapsed = (sample_us - previous_tick) & 0xffffffu;
     if (elapsed < 1000u) return;
     control.position += mechanical_deg - last_deg;
@@ -95,7 +85,10 @@ void control_step(uint32_t sample_us, float mechanical_deg, float wrapped_deg)
     float feedforward = fade * (cogging[i] + fraction * (cogging[(i + 1u) & 511u] - cogging[i]));
     float total = wanted + feedforward;
     float limited = fmaxf(-FOC_CURRENT_MAX, fminf(FOC_CURRENT_MAX, total));
-    /* Track the one final limit, including feedforward. Incremental PI avoids
+    float previous = (float)foc.calibration.direction * control.iq_ref;
+    float step = MOTOR_SPEED_IQ_SLEW_A_S * dt;
+    limited = fmaxf(previous - step, fminf(previous + step, limited));
+    /* Track the final amplitude/rate limit, including feedforward. Incremental PI avoids
        a beta-dependent DC offset being clipped as an integral current. */
     float tracking_gain = motor_params.speed_kp > 0.0f ? motor_params.speed_ki / motor_params.speed_kp * dt : 1.0f;
     integral = wanted + fminf(1.0f, tracking_gain) * (limited - total);

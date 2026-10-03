@@ -1,0 +1,53 @@
+{
+  "low_1": {
+    "frames": 34006,
+    "raw_travel_deg": 408.051269,
+    "raw_mean_rpm": 0.9999786036367201,
+    "raw_speed_std_rpm": 0.06334732462490593,
+    "feedback_mean_rpm": 0.9987210676991706,
+    "feedback_std_rpm": 0.1592542325292395,
+    "iq_target_std_A": 0.15144661585528832,
+    "iq_target_peak_A": 0.478421152,
+    "iq_rms_A": 0.2643154657423064,
+    "id_rms_A": 0.19301329313710988,
+    "low_progress_fraction": 0.0,
+    "longest_low_progress_s": 0.0,
+    "reverse_100ms_fraction": 0.0,
+    "vbus_min_V": 23.2712078,
+    "vbus_max_V": 23.5126743
+  },
+  "low_5": {
+    "frames": 6502,
+    "raw_travel_deg": 389.86084000000005,
+    "raw_mean_rpm": 4.997447059426755,
+    "raw_speed_std_rpm": 0.1477406853900879,
+    "feedback_mean_rpm": 5.00144542341741,
+    "feedback_std_rpm": 0.20443142802107148,
+    "iq_target_std_A": 0.14682509158806972,
+    "iq_target_peak_A": 0.455940157,
+    "iq_rms_A": 0.25674347478976306,
+    "id_rms_A": 0.190275651242703,
+    "low_progress_fraction": 0.0,
+    "longest_low_progress_s": 0.0,
+    "reverse_100ms_fraction": 0.0,
+    "vbus_min_V": 23.2561169,
+    "vbus_max_V": 23.4824905
+  },
+  "low_10": {
+    "frames": 6504,
+    "raw_travel_deg": 779.437928,
+    "raw_mean_rpm": 9.988184017632888,
+    "raw_speed_std_rpm": 0.20091363074634833,
+    "feedback_mean_rpm": 10.000049391183888,
+    "feedback_std_rpm": 0.21345504566970713,
+    "iq_target_std_A": 0.149632748788899,
+    "iq_target_peak_A": 0.47455585,
+    "iq_rms_A": 0.26827224340309175,
+    "id_rms_A": 0.19077550634726947,
+    "low_progress_fraction": 0.0,
+    "longest_low_progress_s": 0.0,
+    "reverse_100ms_fraction": 0.0,
+    "vbus_min_V": 23.2712078,
+    "vbus_max_V": 23.4824905
+  }
+}
