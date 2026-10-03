@@ -13,7 +13,7 @@ static unsigned telemetry_divider;
 static volatile uint32_t last_sample;
 static volatile uint32_t command_count, command_result;
 static uint32_t last_command_ms;
-enum { UNKNOWN, STOP, CLEAR, CAL, ZERO, TORQUE, SPEED, POSITION, SET_PARAM, SAVE, MUSIC_PLAY, MUSIC_STOP };
+enum { UNKNOWN, STOP, CLEAR, CAL, ZERO, TORQUE, SPEED, POSITION, SET_PARAM, SAVE, MUSIC_PLAY, MUSIC_STOP, MUSIC_PLAY_Q };
 
 bool app_init(void)
 {
@@ -23,20 +23,23 @@ bool app_init(void)
     bool loaded = bsp_motor_load(&calibration, &motor_params);
     foc_init(loaded ? &calibration : NULL);
     bsp_adc_start();
+    last_sample = HAL_GetTick();
     return true;
 }
 
 void app_fault(uint32_t fault)
 {
+    uint32_t key = bsp_motor_lock();
     bsp_motor_off();
     foc_trip(fault);
+    bsp_motor_unlock(key);
 }
 
 /* 20 numeric channels and the JustFloat tail: 84 bytes, 500 Hz. */
-static void telemetry(void)
+static void __attribute__((noinline)) telemetry(void)
 {
     float frame[] = {
-        foc.id, foc.iq, foc.iq_ref, adc_sample.bus_voltage,
+        foc.id, foc.iq, foc.iq_ref + foc.iq_audio, adc_sample.bus_voltage,
         control.speed, control.speed_target, control.position, control.position_target,
         mt6835_raw_deg, adc_sample.b_voltage, adc_sample.c_voltage,
         foc.b_offset, foc.c_offset, foc.b_std_mv, foc.c_std_mv, 0.0f,
@@ -119,6 +122,7 @@ bool app_command(const char *line)
     else if (!strcmp(line, "zero")) command = ZERO;
     else if (!strcmp(line, "save")) command = SAVE;
     else if (!strcmp(line, "music play")) command = MUSIC_PLAY;
+    else if (!strcmp(line, "music play q")) command = MUSIC_PLAY_Q;
     else if (!strcmp(line, "music stop")) command = MUSIC_STOP;
     else if (!strncmp(line, "iq ", 3)) { command = TORQUE; valid = parse_decimal(line + 3, &value); }
     else if (!strncmp(line, "rpm ", 4)) { command = SPEED; valid = parse_decimal(line + 4, &value); }
@@ -145,15 +149,17 @@ bool app_command(const char *line)
     uint32_t key = bsp_motor_lock();
     if (valid) switch (command) {
     case STOP: bsp_motor_off(); foc_stop(); break;
-    case MUSIC_PLAY:
+    case MUSIC_PLAY: case MUSIC_PLAY_Q:
         valid = MUSIC_ENABLE && foc.calibrated && foc.zero_ready &&
             (foc.state == FOC_IDLE || foc.state == FOC_RUN);
+        if (command == MUSIC_PLAY_Q) valid = valid && control.mode == CONTROL_TORQUE &&
+            foc.command == 0.0f && foc.iq_ref == 0.0f && fabsf(foc.rpm) < 5.0f;
         if (valid) {
-            music_play();
+            music_play(command == MUSIC_PLAY_Q);
             if (foc.state == FOC_IDLE) valid = foc_current(0.0f);
         }
         break;
-    case MUSIC_STOP: music_stop(); foc.id_ref = 0.0f; break;
+    case MUSIC_STOP: music_stop(); foc.id_ref = foc.iq_audio = 0.0f; break;
     case CLEAR:
         valid = foc.state == FOC_FAULT && HAL_GetTick() - last_sample < 2u &&
             isfinite(mt6835_angle_deg) && isfinite(adc_sample.b_voltage) && isfinite(adc_sample.c_voltage) &&
@@ -200,6 +206,7 @@ bool app_command(const char *line)
         valid = bsp_motor_save(&foc.calibration);
         if (!valid) { app_fault(FOC_FLASH); result = 5; }
         bsp_adc_start();
+        last_sample = HAL_GetTick();
     }
     key = bsp_motor_lock();
     ++command_count;
@@ -232,13 +239,17 @@ void app_poll(void)
         bsp_motor_off(); bsp_adc_stop(); mt6835_stop();
         bsp_motor_unlock(key);
         bool ok = bsp_motor_save(&foc.calibration);
-        if (ok) { foc.calibrated = true; foc.state = FOC_IDLE; }
+        key = bsp_motor_lock();
+        if (ok) { foc.calibrated = true; if (!foc.fault) foc.state = FOC_IDLE; }
         else app_fault(FOC_FLASH);
+        bsp_motor_unlock(key);
         bsp_adc_start();
+        last_sample = HAL_GetTick();
     }
-    /* Restart acquisition after a stalled DMA; never restart motor operation. */
-    if (foc.state == FOC_FAULT && HAL_GetTick() - last_sample >= 2u) {
+    /* A stalled chain must also leave OFFSET/IDLE; restart sampling with gates off. */
+    if (HAL_GetTick() - last_sample >= 2u) {
         uint32_t key = bsp_motor_lock();
+        if (foc.state != FOC_FAULT) app_fault(FOC_TIMING);
         bsp_adc_stop(); mt6835_stop();
         bsp_motor_unlock(key);
         bsp_adc_start();

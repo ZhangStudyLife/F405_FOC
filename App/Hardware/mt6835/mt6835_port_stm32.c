@@ -113,6 +113,7 @@ void mt6835_finish(void)
 
 void mt6835_stop(void)
 {
+    mt6835_angle_deg = mt6835_raw_deg = NAN;
     DMA1_Stream0->CR &= ~DMA_SxCR_EN;
     DMA1_Stream7->CR &= ~DMA_SxCR_EN;
     while ((DMA1_Stream0->CR | DMA1_Stream7->CR) & DMA_SxCR_EN) {}

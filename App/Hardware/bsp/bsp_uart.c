@@ -1,4 +1,6 @@
 #include "bsp_uart.h"
+#include "app.h"
+#include "foc.h"
 #include "usart.h"
 #include <string.h>
 
@@ -79,6 +81,14 @@ void bsp_uart_rx_irq(void)
         s_rx_tail = head;
     }
     s_rx_head = head;
+    if (flags & (DMA_HISR_TEIF5 | DMA_HISR_DMEIF5 | DMA_HISR_FEIF5)) {
+        app_fault(FOC_COMM);
+        DMA1_Stream5->CR &= ~DMA_SxCR_EN;
+        while (DMA1_Stream5->CR & DMA_SxCR_EN) {}
+        s_rx_head = s_rx_tail = 0u;
+        DMA1_Stream5->NDTR = sizeof s_rx;
+        DMA1_Stream5->CR |= DMA_SxCR_EN;
+    }
 }
 
 void bsp_uart_irq(void)

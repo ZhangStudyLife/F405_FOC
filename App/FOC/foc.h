@@ -29,7 +29,7 @@ enum { FOC_OK, FOC_SENSOR, FOC_ADC, FOC_TIMING, FOC_WINDOW, FOC_ALIGNMENT,
 typedef struct { float zero; int32_t direction; } foc_calibration_t;
 typedef struct {
     foc_calibration_t calibration;
-    float duty[3], ud, uq, command, iq_ref, id_ref, id, iq, electrical_deg, rpm;
+    float duty[3], ud, uq, command, iq_ref, iq_audio, id_ref, id, iq, rpm;
     float b_offset, c_offset, angle_step, b_std_mv, c_std_mv;
     /* angle_step: protected increment per nominal 50 us; NaN on invalid input. */
     volatile uint32_t state, fault;
@@ -37,6 +37,7 @@ typedef struct {
     bool calibrated, zero_ready, zero_complete;
 } foc_t;
 extern foc_t foc; /* ISR-owned; foreground changes require a short IRQ critical section. */
+extern const float foc_sine[513]; /* Shared read-only table, including the interpolation endpoint. */
 /* First-trip Id/Iq/Iq_ref/BSP timing source/counter/encoder timing source. */
 extern float foc_fault[6];
 
@@ -49,7 +50,6 @@ void foc_trip(uint32_t fault);
    MT6835 internal measurement delay is not calibrated. */
 void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_voltage, float encoder_delay);
 void foc_outer_step(void); /* Run the 1 kHz outer loop after this cycle's PWM write. */
-float foc_wrap(float radians);
 /* Returns applied vector scale for PI anti-windup; shifts common mode for ADC. */
 float foc_modulate(float alpha, float beta, float bus_voltage, float duty[3]);
 bool foc_window(const float duty[3]);

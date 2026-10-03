@@ -6,7 +6,6 @@
 enum { CONTROL_TORQUE, CONTROL_SPEED, CONTROL_POSITION };
 typedef struct {
     uint32_t mode;
-    bool active;
     float iq_ref, speed, speed_target, position, position_target;
 } control_t;
 extern control_t control; /* ISR-owned; foreground commands require IRQ lock. */

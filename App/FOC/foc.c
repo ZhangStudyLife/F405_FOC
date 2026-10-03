@@ -13,22 +13,24 @@ float foc_fault[6];
 static float previous, position, origin, forward, sum_sin, sum_cos, low, high;
 static uint32_t ticks, previous_sample;
 static float integral_d, integral_q, variance_b, variance_c, position_roundoff;
+static float proportional_d, proportional_q;
 static bool tracking, aligning;
+
+const float foc_sine[513] = {
+#include "sine_table.inc"
+};
 
 static void sincos_fast(float theta, float *s, float *c)
 {
-    static const float table[513] = {
-#include "sine_table.inc"
-    };
     float x = theta * (512.0f / TURN);
     unsigned index = (unsigned)x;
     float fraction = x - (float)index;
     unsigned i = index & 511u, j = (i + 128u) & 511u;
-    *s = table[i] + fraction * (table[i + 1u] - table[i]);
-    *c = table[j] + fraction * (table[j + 1u] - table[j]);
+    *s = foc_sine[i] + fraction * (foc_sine[i + 1u] - foc_sine[i]);
+    *c = foc_sine[j] + fraction * (foc_sine[j + 1u] - foc_sine[j]);
 }
 
-float foc_wrap(float radians)
+static float foc_wrap(float radians)
 {
     return radians - floorf(radians / TURN) * TURN;
 }
@@ -73,8 +75,8 @@ bool foc_window(const float duty[3])
 void foc_stop(void)
 {
     music_stop();
-    foc.command = foc.iq_ref = foc.id_ref = foc.ud = foc.uq = 0.0f;
-    integral_d = integral_q = 0.0f;
+    foc.command = foc.iq_ref = foc.iq_audio = foc.id_ref = foc.ud = foc.uq = 0.0f;
+    integral_d = integral_q = proportional_d = proportional_q = 0.0f;
     aligning = false;
     foc.duty[0] = foc.duty[1] = foc.duty[2] = 0.0f;
     control_stop();
@@ -86,7 +88,7 @@ void foc_trip(uint32_t fault)
     if (foc.state != FOC_FAULT) {
         foc.fault = fault;
         foc.state = FOC_FAULT;
-        float sample[] = {foc.id, foc.iq, foc.iq_ref, (float)(motor_timing_fault & 255u),
+        float sample[] = {foc.id, foc.iq, foc.iq_ref + foc.iq_audio, (float)(motor_timing_fault & 255u),
                           (float)((motor_timing_fault & 255u) ? motor_timing_fault >> 8 :
                                   mt6835_timing_fault == 1u ? mt6835_last_counter : 0u),
                           (float)mt6835_timing_fault};
@@ -102,7 +104,7 @@ bool foc_calibrate(void)
     music_stop();
     foc.id_ref = 0.0f;
     foc.calibrated = false; /* An interrupted/failed attempt must not permit RUN. */
-    integral_d = integral_q = 0.0f;
+    integral_d = integral_q = proportional_d = proportional_q = 0.0f;
     position = previous; /* Keep alignment deltas precise after many revolutions. */
     position_roundoff = 0.0f;
     ticks = 0u;
@@ -119,8 +121,8 @@ void foc_init(const foc_calibration_t *calibration)
     aligning = false; /* Calibration requires an explicit calibration command. */
     ticks = 0u;
     integral_d = integral_q = variance_b = variance_c = 0.0f;
+    proportional_d = proportional_q = 0.0f;
     if (calibration) { foc.calibration = *calibration; foc.calibrated = true; }
-    foc.state = FOC_OFFSET; /* Gate-off current offsets precede any alignment. */
 }
 
 bool foc_current(float amps)
@@ -130,7 +132,7 @@ bool foc_current(float amps)
     foc.command = amps;
     if (foc.state == FOC_IDLE && (amps != 0.0f || music_active())) {
         aligning = false;
-        integral_d = integral_q = foc.iq_ref = 0.0f;
+        integral_d = integral_q = proportional_d = proportional_q = foc.iq_ref = foc.iq_audio = 0.0f;
         ticks = 0u;
         foc.state = FOC_PRECHARGE;
     }
@@ -201,15 +203,16 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
             }
             foc.zero_ready = true;
             foc.state = FOC_IDLE;
-            if (aligning && !foc.calibrated) (void)foc_calibrate();
         }
         return;
     }
     if (!foc.zero_ready) { foc.id = foc.iq = NAN; return; }
     float omega = (float)foc.calibration.direction * MOTOR_POLE_PAIRS * foc.rpm * (TURN / 60.0f);
-    float theta = foc_wrap((float)foc.calibration.direction * MOTOR_POLE_PAIRS * mechanical_deg * (PI / 180.0f) -
-                          foc.calibration.zero - omega * encoder_delay);
-    foc.electrical_deg = theta * (180.0f / PI);
+    float theta = (float)foc.calibration.direction * MOTOR_POLE_PAIRS * mechanical_deg * (PI / 180.0f) -
+                  foc.calibration.zero - omega * encoder_delay;
+    /* MT6835 gives one mechanical turn: avoid floorf in the 20 kHz path. */
+    theta -= (float)(int32_t)(theta * (1.0f / TURN)) * TURN;
+    if (theta < 0.0f) theta += TURN;
     sincos_fast(theta, &s, &c);
     float ib = (b_voltage - foc.b_offset) * 50.0f, ic = (c_voltage - foc.c_offset) * 50.0f;
     float ia = -ib - ic, beta = (ib - ic) * 0.5773502692f;
@@ -227,7 +230,7 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
     }
     if (foc.state == FOC_RUN) {
         /* The speed PI must retain fast torque correction; slew torque commands only. */
-        if (control.active && control.mode != CONTROL_TORQUE) foc.iq_ref = control.iq_ref;
+        if (control.mode != CONTROL_TORQUE) foc.iq_ref = control.iq_ref;
         else {
             float step = foc.command - foc.iq_ref;
             float ramp = motor_params.current_ramp * 5e-5f;
@@ -236,16 +239,19 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
             foc.iq_ref += step;
         }
         /* A stalled speed loop must not hold the rotor at its current limit. */
-        if (control.active && control.mode == CONTROL_SPEED && fabsf(control.speed_target) >= 5.0f &&
+        if (control.mode == CONTROL_SPEED && fabsf(control.speed_target) >= 5.0f &&
             fabsf(foc.rpm) < 5.0f && fabsf(foc.iq_ref) >= 0.9f * FOC_CURRENT_MAX) {
             if (++ticks >= 10000u) { foc_trip(FOC_STALL); return; }
         } else ticks = 0u;
-        /* 600 Hz PI, R=.12 ohm, L=50 uH; no feedback low-pass.
-           Back calculation Tt=L/R. Feedforward uses nominal motor parameters. */
-        foc.id_ref = music_step(foc.iq_ref);
-        float ed = foc.id_ref - foc.id, eq = foc.iq_ref - foc.iq;
-        float ud = motor_params.current_kp * ed + integral_d - omega * MOTOR_INDUCTANCE_H * foc.iq;
-        float uq = motor_params.current_kp * eq + integral_q + omega * (MOTOR_INDUCTANCE_H * foc.id + MOTOR_FLUX_WB);
+        music_sample_t audio = music_step(foc.iq_ref);
+        foc.id_ref = audio.id;
+        foc.iq_audio = audio.iq;
+        float ed = foc.id_ref - foc.id, eq = foc.iq_ref + foc.iq_audio - foc.iq;
+        /* 2 kHz low-pass on P only; integral and phase-current protection stay raw. */
+        proportional_d += 0.4665119f * (ed - proportional_d);
+        proportional_q += 0.4665119f * (eq - proportional_q);
+        float ud = motor_params.current_kp * proportional_d + integral_d + audio.ud - omega * MOTOR_INDUCTANCE_H * foc.iq;
+        float uq = motor_params.current_kp * proportional_q + integral_q + audio.uq + omega * (MOTOR_INDUCTANCE_H * foc.id + MOTOR_FLUX_WB);
         /* Predict to next PWM centre (next valley + 25 us). At <=8600 RPM,
            |advance|<.32 rad: rotation error <2.9e-5, one sin/cos pair. */
         float advance = omega * ((12600.0f - FOC_HOLD_TICKS) / 168e6f);
@@ -260,7 +266,8 @@ void foc_step(float mechanical_deg, float bus_voltage, float b_voltage, float c_
         integral_q += motor_params.current_ki * 5e-5f * eq + MOTOR_CURRENT_ANTI_WINDUP * (foc.uq - uq);
     } else if (foc.state == FOC_CALIBRATE) {
         ++ticks;
-        float theta = 0.0f, ud = MOTOR_ALIGN_VOLTAGE_V;
+        theta = 0.0f;
+        float ud = MOTOR_ALIGN_VOLTAGE_V;
         if (ticks <= 10000u) ud *= (float)ticks / 10000.0f;
         if (ticks == 26000u) low = high = position;
         if (ticks > 26000u && ticks <= 30000u) {

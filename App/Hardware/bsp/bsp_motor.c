@@ -30,6 +30,7 @@ void bsp_motor_off(void)
     GPIOB->MODER = (GPIOB->MODER & ~15u) | 5u;
     GPIOC->MODER = (GPIOC->MODER & ~(63u << 12)) | (21u << 12);
     motor_mode = pending_mode = MOTOR_OFF;
+    ready = false;
     for (unsigned i = 0; i < 3; ++i) motor_duty[i] = 0.0f;
 }
 

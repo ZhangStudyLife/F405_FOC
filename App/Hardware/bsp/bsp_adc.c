@@ -5,7 +5,6 @@
 
 static volatile uint32_t s_raw[2]; /* CDR: ADC2 in high half, ADC1 in low half. */
 volatile bsp_adc_sample_t adc_sample;
-volatile uint16_t adc_raw_b, adc_raw_c, adc_raw_bus;
 volatile uint32_t adc_errors;
 
 void bsp_adc_start(void)
@@ -60,17 +59,13 @@ bool bsp_adc_read(void)
         ADC1->CR1 = ADC2->CR1 = 0u;
         ADC1->CR2 = ADC2->CR2 = 0u;
         adc_sample.b_voltage = adc_sample.c_voltage = adc_sample.bus_voltage = NAN;
-        adc_raw_b = adc_raw_c = adc_raw_bus = 0xffffu;
         adc_errors++;
         return false;
     }
     uint32_t phases = s_raw[0];
-    adc_raw_b = (uint16_t)phases;
-    adc_raw_c = (uint16_t)(phases >> 16);
-    adc_raw_bus = (uint16_t)s_raw[1];
-    adc_sample.b_voltage = (float)adc_raw_b * (3.3f / 4095.0f);
-    adc_sample.c_voltage = (float)adc_raw_c * (3.3f / 4095.0f);
-    adc_sample.bus_voltage = (float)adc_raw_bus * ((3.3f / 4095.0f) * (41.2f / 2.2f));
+    adc_sample.b_voltage = (float)(uint16_t)phases * (3.3f / 4095.0f);
+    adc_sample.c_voltage = (float)(uint16_t)(phases >> 16) * (3.3f / 4095.0f);
+    adc_sample.bus_voltage = (float)(uint16_t)s_raw[1] * ((3.3f / 4095.0f) * (41.2f / 2.2f));
     return true;
 }
 

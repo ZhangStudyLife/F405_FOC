@@ -15,7 +15,6 @@ static bool tracking;
 void control_stop(void)
 {
     control.mode = CONTROL_TORQUE;
-    control.active = false;
     control.iq_ref = control.speed_target = control.position_target = integral = 0;
 }
 
@@ -26,7 +25,7 @@ bool control_command(uint32_t mode, float target)
     if (fabsf(target) > limit || !foc.calibrated || !foc.zero_ready) return false;
     if (foc.state != FOC_IDLE && foc.state != FOC_RUN && foc.state != FOC_PRECHARGE) return false;
     if (foc.state == FOC_IDLE && mode == CONTROL_TORQUE && target == 0) return true;
-    if (mode != control.mode || !control.active) {
+    if (mode != control.mode || foc.state == FOC_IDLE) {
         integral = control.iq_ref = 0;
         control.speed_target = 0;
         last_p = -control.speed;
@@ -34,7 +33,6 @@ bool control_command(uint32_t mode, float target)
     if (foc.state == FOC_IDLE && !foc_current(mode == CONTROL_TORQUE ? target : 0.01f)) return false;
     foc.command = mode == CONTROL_TORQUE ? target : 0;
     control.mode = mode;
-    control.active = true;
     if (mode == CONTROL_SPEED) control.speed_target = target;
     if (mode == CONTROL_POSITION) control.position_target = target;
     return true;
@@ -68,7 +66,7 @@ void control_step(uint32_t sample_us, float mechanical_deg)
     control.position += mechanical_deg - last_deg;
     last_deg = mechanical_deg;
     previous_tick = sample_us;
-    if (elapsed > 4000u || foc.state != FOC_RUN || !control.active || control.mode == CONTROL_TORQUE) return;
+    if (elapsed > 4000u || foc.state != FOC_RUN || control.mode == CONTROL_TORQUE) return;
     if (control.mode == CONTROL_POSITION)
         control.speed_target = fmaxf(-motor_params.position_speed, fminf(motor_params.position_speed,
             motor_params.position_kp * (control.position_target - control.position)));
