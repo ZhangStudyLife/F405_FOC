@@ -13,7 +13,7 @@ static unsigned telemetry_divider;
 static volatile uint32_t last_sample;
 static volatile uint32_t command_count, command_result;
 static uint32_t last_command_ms;
-enum { UNKNOWN, STOP, CLEAR, CAL, ZERO, TORQUE, SPEED, POSITION, SET_PARAM, SAVE, MUSIC_PLAY, MUSIC_STOP, MUSIC_PLAY_Q };
+enum { UNKNOWN, STOP, CLEAR, CAL, ZERO, TORQUE, SPEED, POSITION, SET_PARAM, SAVE, MUSIC_PLAY, MUSIC_STOP, MUSIC_PLAY_Q, MUSIC_SONG };
 
 bool app_init(void)
 {
@@ -115,6 +115,7 @@ bool app_command(const char *line)
     unsigned command = UNKNOWN;
     float value = 0;
     float *parameter = NULL;
+    const music_song_t *song = NULL;
     bool valid = true;
     if (!strcmp(line, "stop")) command = STOP;
     else if (!strcmp(line, "clear")) command = CLEAR;
@@ -123,7 +124,12 @@ bool app_command(const char *line)
     else if (!strcmp(line, "save")) command = SAVE;
     else if (!strcmp(line, "music play")) command = MUSIC_PLAY;
     else if (!strcmp(line, "music play q")) command = MUSIC_PLAY_Q;
-    else if (!strcmp(line, "music stop")) command = MUSIC_STOP;
+    else if (!strcmp(line, "music stop") || !strcmp(line, "Music stop")) command = MUSIC_STOP;
+    else if (!strncmp(line, "Music ", 6) || !strncmp(line, "music ", 6)) {
+        command = MUSIC_SONG;
+        song = music_find(line + 6);
+        valid = song != NULL;
+    }
     else if (!strncmp(line, "iq ", 3)) { command = TORQUE; valid = parse_decimal(line + 3, &value); }
     else if (!strncmp(line, "rpm ", 4)) { command = SPEED; valid = parse_decimal(line + 4, &value); }
     else if (!strncmp(line, "pos ", 4)) { command = POSITION; valid = parse_decimal(line + 4, &value); }
@@ -149,13 +155,14 @@ bool app_command(const char *line)
     uint32_t key = bsp_motor_lock();
     if (valid) switch (command) {
     case STOP: bsp_motor_off(); foc_stop(); break;
-    case MUSIC_PLAY: case MUSIC_PLAY_Q:
+    case MUSIC_PLAY: case MUSIC_PLAY_Q: case MUSIC_SONG:
         valid = MUSIC_ENABLE && foc.calibrated && foc.zero_ready &&
             (foc.state == FOC_IDLE || foc.state == FOC_RUN);
         if (command == MUSIC_PLAY_Q) valid = valid && control.mode == CONTROL_TORQUE &&
             foc.command == 0.0f && foc.iq_ref == 0.0f && fabsf(foc.rpm) < 5.0f;
         if (valid) {
-            music_play(command == MUSIC_PLAY_Q);
+            if (command == MUSIC_SONG) music_play_song(song);
+            else music_play(command == MUSIC_PLAY_Q);
             if (foc.state == FOC_IDLE) valid = foc_current(0.0f);
         }
         break;
