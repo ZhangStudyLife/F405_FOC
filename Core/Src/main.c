@@ -30,6 +30,8 @@
 /* USER CODE BEGIN Includes */
 #include "foc.h"
 #include "app.h"
+#include "debug.h"
+#include "bsp_usb.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -102,7 +104,14 @@ int main(void)
   /* USER CODE BEGIN 2 */
   if (!app_init()) {
     app_fault(foc.fault ? foc.fault : FOC_TIMING);
-    while (1) { __WFI(); }
+    while (1) {
+#if DEBUG_USB_ENABLE
+      uint8_t data[64];
+      bsp_usb_poll();
+      bsp_usb_read(data, sizeof data);
+#endif
+      __WFI();
+    }
   }
   /* USER CODE END 2 */
 

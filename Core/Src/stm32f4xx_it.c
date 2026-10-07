@@ -26,6 +26,7 @@
 #include "app.h"
 #include "bsp_adc.h"
 #include "bsp_uart.h"
+#include "debug.h"
 #include "mt6835_port_stm32.h"
 /* USER CODE END Includes */
 
@@ -218,7 +219,9 @@ void SysTick_Handler(void)
 void DMA1_Stream6_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Stream6_IRQn 0 */
-
+#if !DEBUG_UART_ENABLE
+  return;
+#endif
   /* USER CODE END DMA1_Stream6_IRQn 0 */
   HAL_DMA_IRQHandler(&hdma_usart2_tx);
   /* USER CODE BEGIN DMA1_Stream6_IRQn 1 */
@@ -249,7 +252,9 @@ void ADC_IRQHandler(void)
 void USART2_IRQHandler(void)
 {
   /* USER CODE BEGIN USART2_IRQn 0 */
+#if DEBUG_UART_ENABLE
   bsp_uart_irq();
+#endif
   return;
 
   /* USER CODE END USART2_IRQn 0 */
@@ -265,7 +270,9 @@ void USART2_IRQHandler(void)
 void OTG_FS_IRQHandler(void)
 {
   /* USER CODE BEGIN OTG_FS_IRQn 0 */
-
+#if !DEBUG_USB_ENABLE
+  return;
+#endif
   /* USER CODE END OTG_FS_IRQn 0 */
   HAL_PCD_IRQHandler(&hpcd_USB_OTG_FS);
   /* USER CODE BEGIN OTG_FS_IRQn 1 */
@@ -276,7 +283,9 @@ void OTG_FS_IRQHandler(void)
 /* USER CODE BEGIN 1 */
 void DMA1_Stream5_IRQHandler(void)
 {
+#if DEBUG_UART_ENABLE
     bsp_uart_rx_irq();
+#endif
 }
 
 void DMA2_Stream0_IRQHandler(void)

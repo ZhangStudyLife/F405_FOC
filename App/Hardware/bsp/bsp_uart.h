@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 typedef struct {
-    uint32_t tx_rejected, dma_errors, rx_lost, rx_errors;
+    uint32_t tx_rejected, dma_errors, rx_lost, rx_errors, rx_dma_errors;
 } bsp_uart_stats_t;
 extern volatile bsp_uart_stats_t g_uart_stats;
 

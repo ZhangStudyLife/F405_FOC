@@ -21,6 +21,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     App/Hardware/bsp/bsp_motor.c
     App/Hardware/bsp/bsp_adc.c
     App/Hardware/bsp/bsp_uart.c
+    App/Hardware/bsp/bsp_usb.c
+    App/Debug/debug.c
     App/Hardware/mt6835/mt6835.c
     App/Hardware/mt6835/mt6835_port_stm32.c
 )
@@ -31,14 +33,20 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     App/Music
     App/Hardware/bsp
     App/Hardware/mt6835
+    App/Debug
+    App/Protocols/JustFloat
 )
 target_link_libraries(${CMAKE_PROJECT_NAME} stm32cubemx m)
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "-Wl,--wrap=HAL_PCD_Start")
 # Keep the 20 kHz path optimized in Debug too; -O0 misses PWM deadlines.
 set_source_files_properties(
     App/FOC/foc.c App/Music/music.c App/Hardware/bsp/bsp_motor.c App/Hardware/bsp/bsp_uart.c
+    App/Hardware/bsp/bsp_usb.c App/Debug/debug.c
     App/Control/app.c App/Control/control.c App/Hardware/bsp/bsp_adc.c
     App/Hardware/mt6835/mt6835.c App/Hardware/mt6835/mt6835_port_stm32.c
     PROPERTIES COMPILE_OPTIONS "-O3")
+set_source_files_properties(Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_usb.c
+    DIRECTORY cmake/stm32cubemx PROPERTIES COMPILE_OPTIONS "-O3")
 add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:${CMAKE_PROJECT_NAME}> ${CMAKE_PROJECT_NAME}.bin
     COMMAND ${CMAKE_OBJCOPY} -O ihex $<TARGET_FILE:${CMAKE_PROJECT_NAME}> ${CMAKE_PROJECT_NAME}.hex

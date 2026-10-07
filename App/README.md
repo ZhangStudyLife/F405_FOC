@@ -1,12 +1,15 @@
-# F405：UART 命令与 JustFloat
+# F405：USB CDC、UART 命令与 JustFloat
 
 本文描述当前源码的接线、命令和遥测协议；板上版本及 Flash 参数需实际回读确认。
 硬件连接见 [硬件PCB拓扑](../硬件PCB拓扑.md)，编码器诊断见 [MT6835](../docs/mt6835.md)。
 
 ## 接线与使用
 
-USART2：PA2 → 转接器 RX，PA3 ← 转接器 TX，GND 共地；3.3 V TTL。
-串口设置：1000000 baud、8 数据位、无校验、1 停止位、无流控。
+默认使用 USB CDC（PA11 DM、PA12 DP），打开虚拟串口时启用 DTR；波特率设置不决定 USB 线速。
+`Debug/debug.h` 集中设置 USB/UART 开关、唯一命令来源和回传频率。
+启用的通道都回传相同波形，只有选定来源执行命令；默认 USB 开、UART 关、USB 命令。
+UART 使用 USART2：PA2 → 转接器 RX，PA3 ← 转接器 TX，GND 共地；3.3 V TTL。
+UART 设置：1000000 baud、8 数据位、无校验、1 停止位、无流控。
 上位机选择 JustFloat；板子只输出二进制波形，没有文字应答。
 PD2为低电平点亮的命令LED：启动熄灭，完整非空命令亮100 ms，连续命令续期。
 拒绝的命令也闪亮；空行不触发，CRLF只触发一次；通过非阻塞时间检查自动熄灭。
@@ -46,7 +49,7 @@ current_ramp（A/s）、position_speed（rpm）。
 参数范围分别为 0～10、0～20000、0～1、0～10、0～100、(0,1000]、(0,8600]。
 电流 Ki 使用每秒积分增益，速度 PI 按 rpm 误差计算，位置 Kp 单位 rpm/度。
 
-目标保持到下次命令，拔串口线不自动停止。rpm 0 保持零速，pos 保持位置；
+目标保持到下次命令，拔线、关闭 DTR 或主机停读不自动停止。rpm 0 保持零速，pos 保持位置；
 关闭功率必须发 stop。clear 仅在故障及安全条件满足时接受。
 current_ramp 只限制 iq 转矩命令的变化率。速度/位置模式的完整 PI 加前馈目标
 先经 ±20 A 限幅，再按 120 A/s 限变率；统一反算抗饱和跟踪最终目标。
@@ -64,8 +67,11 @@ Flash 保存期间采样和波形会暂停；等波形恢复且命令结果为�
 
 ## 波形
 
-固定500 Hz；20个小端float32加帧尾00 00 80 7F，每帧84字节。
-占串口带宽42%；发送队列满则丢整帧。500 Hz不能用于测量亚毫秒电流环响应。
+默认1000 Hz；20个小端float32加帧尾00 00 80 7F，每帧84字节，即84,000 B/s。
+占UART有效带宽84%；发送队列满则丢整帧，有空间后继续回传。
+USB使用8 KB发送队列、单次最多256 B，完成回调后释放在途数据；接收单包64 B，消费后再挂接。
+USB未配置、DTR关闭或挂起时暂停生产波形；新会话清空半条命令，主机也应重新同步帧。
+1 kHz回传不能用于测量亚毫秒电流环响应。
 这是新的20通道协议；历史I0～I23 CSV仍按旧24通道含义分析，不能套用本表。
 
 | 通道（从 0 开始） | 内容 |
@@ -78,7 +84,7 @@ Flash 保存期间采样和波形会暂停；等波形恢复且命令结果为�
 | 11～12 | B、C路零偏均值（V） |
 | 13～14 | B、C路零偏标准差（mV） |
 | 15 | 合并状态字，数值整数，不是浮点位重解释 |
-| 16～18 | 已解析命令计数、最近命令结果、发送丢帧计数 |
+| 16～18 | 已解析命令计数、最近命令结果、所选命令通道的发送拒绝计数（NONE为0） |
 | 19 | 首次时序故障计数，无对应计数时为0 |
 
 状态字范围0～16777215，可由float32精确表示。转换为整数后按以下位提取：
@@ -125,17 +131,23 @@ Id/Iq尚未有效换算时为NaN，编码器读取失败时通道8为NaN；解�
 
 ## 文件与调用关系
 
-- Control/app.c：初始化、UART 命令、波形、保存调度。
+- Control/app.c：初始化、电机命令执行、波形内容、保存调度。
+- Debug/：配置、遥测分发、唯一命令来源及CR/LF组行。
+- Protocols/JustFloat/justfloat.h：原地补浮点帧尾。
 - Control/control.c：1 kHz 速度 PI、位置 P、目标与反馈状态。
 - FOC/foc.c：20 kHz 电流 PI、坐标变换、SVPWM、校准和保护。
 - Music/：完整生日歌 PCM 波形、C 大调音阶、20 kHz D 轴电流目标，编译开关。
 - Hardware/mt6835/：编码器 CRC、角度读取和 SPI DMA。
-- Hardware/bsp/：ADC 采样、PWM/Flash、UART DMA。
+- Hardware/bsp/：ADC 采样、PWM/Flash、UART DMA、USB字节收发。
 - Config/：默认限值、七个运行参数。
 
 ADC DMA → 编码器 SPI DMA 完成 → app_sample → foc_step → PWM 提交
 → 分频执行 control_step → 分频输出波形。
-main → app_poll → UART 解析/停机保存。
+main → app_poll → debug_poll → USB服务/命令组行 → app_command；停机保存仍由app调度。
+
+USB中断优先级7。CubeMX没有FIFO默认值与USB启动之间的USER CODE挂点，
+顶层CMake用`--wrap=HAL_PCD_Start`在连接前配置RX/EP0/数据IN/通知IN为128/32/144/16 words，合计320。
+回调及开关都在USER CODE块，CubeMX可重新生成；不手改生成CMake。
 
 USART2 使用 16 倍过采样和三点多数采样，42 MHz 外设时钟下 1 Mbaud 的分频误差为零。
 接收使用 128 字节循环 DMA，空闲/半满/全满中断提交数据。
@@ -146,7 +158,7 @@ DMA1 分配：Stream0 编码器 RX、Stream5 UART RX、Stream6 UART TX、Stream7
 外环测速使用仅由有效编码器增量驱动的两状态 PLL，20 kHz 更新，PI 仍为 1 kHz。
 算法、补偿表和主机入口见 [speed_control.md](speed_control.md)。
 20 kHz 多圈位置累计使用补偿求和，避免长时间运行后丢失低速的微小角度增量。
-没有轨迹规划、Studio、CAN 或 USB 运行功能。
+没有轨迹规划、Studio或CAN运行功能。
 
 ## 构建与下载
 

@@ -1,7 +1,8 @@
 #include "app.h"
 #include "bsp_adc.h"
 #include "bsp_motor.h"
-#include "bsp_uart.h"
+#include "debug.h"
+#include "justfloat.h"
 #include "control.h"
 #include "music.h"
 #include "mt6835_port_stm32.h"
@@ -17,7 +18,7 @@ enum { UNKNOWN, STOP, CLEAR, CAL, ZERO, TORQUE, SPEED, POSITION, SET_PARAM, SAVE
 
 bool app_init(void)
 {
-    bsp_uart_init();
+    debug_init();
     if (!mt6835_init()) { app_fault(FOC_SENSOR); return false; }
     foc_calibration_t calibration;
     bool loaded = bsp_motor_load(&calibration, &motor_params);
@@ -35,16 +36,15 @@ void app_fault(uint32_t fault)
     bsp_motor_unlock(key);
 }
 
-/* 20 numeric channels and the JustFloat tail: 84 bytes, 500 Hz. */
+/* 20 numeric channels and the JustFloat tail: 84 bytes. */
 static void __attribute__((noinline)) telemetry(void)
 {
-    float frame[] = {
+    float frame[21] = {
         foc.id, foc.iq, foc.iq_ref + foc.iq_audio, adc_sample.bus_voltage,
         control.speed, control.speed_target, control.position, control.position_target,
         mt6835_raw_deg, adc_sample.b_voltage, adc_sample.c_voltage,
         foc.b_offset, foc.c_offset, foc.b_std_mv, foc.c_std_mv, 0.0f,
-        (float)command_count, (float)command_result, (float)g_uart_stats.tx_rejected,
-        0.0f, INFINITY
+        (float)command_count, (float)command_result, (float)debug_tx_rejected(), 0.0f
     };
     if (foc.state == FOC_FAULT) {
         memcpy(frame, foc_fault, 3u * sizeof(float));
@@ -59,7 +59,7 @@ static void __attribute__((noinline)) telemetry(void)
         ((uint32_t)(motor_mode != MOTOR_OFF) << 23);
     if (foc.state == FOC_FAULT) status |= ((uint32_t)foc_fault[3] << 18) | ((uint32_t)foc_fault[5] << 20);
     frame[15] = (float)status;
-    (void)bsp_uart_write(frame, sizeof frame);
+    debug_write(frame, justfloat_pack(frame, 20u));
 }
 
 void app_sample(void)
@@ -80,11 +80,11 @@ void app_sample(void)
     else if (!bsp_motor_write(foc.duty, mode)) app_fault(FOC_TIMING);
     bsp_motor_unlock(key);
     foc_outer_step();
-    if (++telemetry_divider == 40u) {
+    if (++telemetry_divider == 20000u / DEBUG_TELEMETRY_HZ) {
         telemetry_divider = 0;
         telemetry();
     }
-    bsp_uart_tick();
+    debug_tick();
     bsp_motor_sample_end();
 }
 
@@ -224,22 +224,7 @@ bool app_command(const char *line)
 
 void app_poll(void)
 {
-    static char line[64];
-    static unsigned length;
-    static bool overflow;
-    static uint32_t rx_errors;
-    uint8_t ch;
-    while (bsp_uart_read(&ch, 1)) {
-        uint32_t errors = g_uart_stats.rx_errors + g_uart_stats.rx_lost;
-        if (errors != rx_errors) { overflow = true; rx_errors = errors; }
-        if (ch == '\r' || ch == '\n') {
-            line[length] = 0;
-            if (overflow) (void)app_command("");
-            else if (length) (void)app_command(line);
-            length = 0; overflow = false;
-        } else if (ch >= 32 && ch < 127 && length < sizeof line - 1) line[length++] = (char)ch;
-        else overflow = true;
-    }
+    debug_poll();
     if (HAL_GetTick() - last_command_ms >= 100u) GPIOD->BSRR = GPIO_PIN_2;
     if (foc.state == FOC_SAVE) {
         uint32_t key = bsp_motor_lock();
