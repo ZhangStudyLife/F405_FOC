@@ -16,13 +16,13 @@
 #define MOTOR_ALIGN_VOLTAGE_V 0.6f
 
 /* Low-speed bench candidate; gains are A/rpm and A/(rpm*s). */
-#define MOTOR_SPEED_KP 0.008f
-#define MOTOR_SPEED_KI 0.10f
+#define MOTOR_SPEED_KP 0.005f
+#define MOTOR_SPEED_KI 0.01f
 #define MOTOR_POSITION_KP 4.0f
-/* Experimental speed controller; see App/speed_control.md for measured limits. */
+/* Encoder PLL and speed PI; see App/speed_control.md. */
 #define MOTOR_SPEED_REFERENCE_WEIGHT 0.8f
 #define MOTOR_SPEED_PLL_RAD_S 2000.0f
-/* Bench candidate; startup tests are blocked by encoder undervoltage. */
+/* Rate limit on the complete speed-loop current target. */
 #define MOTOR_SPEED_IQ_SLEW_A_S 120.0f
 #define MOTOR_COGGING_FULL_RPM 50.0f
 #define MOTOR_COGGING_OFF_RPM 200.0f

@@ -1,9 +1,7 @@
 # F405：UART 命令与 JustFloat
 
-2026-10-04 已完成整体代码审查及局部精简，板上恢复为无音乐采集缓冲的正式 Release。
-低速和 50 rpm 音乐完成本轮初版整理固件测试；高速起步再次触发编码器欠压，最终整理版本未继续带电运行。
-修复、状态转移、优先级、数组检查及验收边界见 [整体代码审查](20261004-code-audit.md)。
-新增生日歌固件已完成构建与离线验证，尚未烧录和实机试听。
+本文描述当前源码的接线、命令和遥测协议；板上版本及 Flash 参数需实际回读确认。
+硬件连接见 [硬件PCB拓扑](../硬件PCB拓扑.md)，编码器诊断见 [MT6835](../docs/mt6835.md)。
 
 ## 接线与使用
 
@@ -37,12 +35,11 @@ PD2为低电平点亮的命令LED：启动熄灭，完整非空命令亮100 ms�
 歌曲数据格式、转换工具和命令协议见 [Music/README.md](Music/README.md)。
 正常 `music play` 只注入 D 轴；`music play q` 会产生振动转矩，是单独的静止试听对照。
 音乐目标带 R/L 电压前馈及约 50 µs 提前；PI 比例通道增加 2 kHz 低通，
-原始相电流保护不滤波。PWM 不因静止或音乐结束而关闭；本轮实测分析及验证边界见
-[Music/20261004-current-audio-analysis.md](Music/20261004-current-audio-analysis.md)。
+原始相电流保护不滤波。PWM 不因静止或音乐结束而关闭。
 
-源码及本次回读的 Flash 速度 PI 均为 Kp=0.008、Ki=0.10；已有参数仍优先加载，不会自动迁移。
-当前版本尚未完成低速丝滑、高速低电流波动及完整启停验收，见 speed_control.md。
-原始采样噪声门槛经用户确认调整为4 mV；零偏通过后仍需验证实际电流和低速控制效果。
+源码默认速度 PI 为 Kp=0.005、Ki=0.01；已有 Flash 参数优先加载，不会自动迁移。
+当前源码的完整运行验收尚未完成，控制算法与采集入口见 [speed_control.md](speed_control.md)。
+原始采样噪声门槛为4 mV；零偏通过后仍需验证实际电流和低速控制效果。
 
 参数名：current_kp、current_ki、speed_kp、speed_ki、position_kp、
 current_ramp（A/s）、position_speed（rpm）。
@@ -147,7 +144,7 @@ DMA1 分配：Stream0 编码器 RX、Stream5 UART RX、Stream6 UART TX、Stream7
 位置误差 × Kp → 速度限幅 → 增量二自由度速度 PI + 绝对角度前馈
 → Iq 限幅及限变率 → 电流 PI。
 外环测速使用仅由有效编码器增量驱动的两状态 PLL，20 kHz 更新，PI 仍为 1 kHz。
-本版本尚未完成低波动验收，指标、标定来源和主机入口见 [speed_control.md](speed_control.md)。
+算法、补偿表和主机入口见 [speed_control.md](speed_control.md)。
 20 kHz 多圈位置累计使用补偿求和，避免长时间运行后丢失低速的微小角度增量。
 没有轨迹规划、Studio、CAN 或 USB 运行功能。
 
@@ -159,8 +156,7 @@ DMA1 分配：Stream0 编码器 RX、Stream5 UART RX、Stream6 UART TX、Stream7
     cmake --build --preset Debug
     cmake --preset Release
     cmake --build --preset Release
-    python ../download/flash.py flash Release
+    python ../download/flash.py flash Release --erase=program
 
-源码保留本次之前的控制修改。外设 CMake 由 CubeMX 生成；不要手改。
-旧 Studio、测试、工具及历史目录的物理删除被自动审批阻止，尚留在磁盘，
-均不属于当前固件构建或使用流程；清理任务尚未完成。
+外设 CMake 由 CubeMX 生成；不要手改。`--erase=program` 保留参数和校准区。
+下载脚本的默认擦除方式及完整参数见 [下载说明](../../download/README.md)。

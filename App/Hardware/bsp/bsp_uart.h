@@ -18,7 +18,7 @@ void bsp_uart_init(void);
 bool bsp_uart_write(const void *data, size_t size);
 size_t bsp_uart_read(void *data, size_t size);
 
-/* Start queued TX after acquisition/control (foreground for capture export).
+/* Start queued TX after acquisition/control.
  * Never schedule normal telemetry from SysTick: its phase drifts across ADC. */
 void bsp_uart_tick(void);
 /* USART2 IRQ hook. */

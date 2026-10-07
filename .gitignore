@@ -1,26 +1,11 @@
-# ---- 构建产物 ----
-# CMake/Ninja 生成目录(build/Debug、build/Release),含 CMakeCache、compile_commands.json、
-# .elf/.bin/.hex/.map 等,全部可由 CMakeLists.txt 重新生成
+# CMake 构建与本地采集
 build/
 
-# ---- 本地分析产物 ----
-# CubeMX 配置排查与验证留下的日志/脚本,非工程组成部分,但本地保留备查
-validation/
-
-# ---- CubeMX 备份 ----
-# 修改 .ioc 前自动/手动留的备份,真正生效的是 405_FOC.ioc
+# CubeMX 备份
 *.ioc.original.bak
 *.ioc.bak
 
-# ---- 调试工具产物 ----
-# tools/bench/ 是版本库内的台架工具；它默认把采集归档写到 %TEMP%\foc_bench，
-# 所以这里只需忽略早期脚本在本目录留下的波形输出
-scope.png
-scope*.csv
-
-# ---- 编辑器 / IDE ----
-# .vscode 只忽略个人化设置;c_cpp_properties.json 是本工程专属的 IntelliSense
-# 配置(ARM GCC 路径、STM32 宏、includePath),必须随项目走,否则换机器就满屏红线
+# 本地编辑器配置
 .vscode/*
 !.vscode/c_cpp_properties.json
 .idea/
@@ -28,13 +13,12 @@ scope*.csv
 *.swo
 *~
 
-# ---- AI 助手本地记忆 ----
-# .workbuddy/memory 是会话工作日志(每日追加),只服务本地助手,不是工程组成;
-# 其中记录的是过程与踩坑,不属于固件源码,不应进版本控制
+# 本地助手记录
 .workbuddy/
 
-# ---- 操作系统 ----
+# 操作系统与 Python 缓存
 Thumbs.db
 Desktop.ini
 .DS_Store
 __pycache__/
+*.pyc

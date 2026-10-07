@@ -10,4 +10,4 @@ STM32F405 C11 firmware. Read App/README.md for wiring, commands and waveform cha
 - Build: cmake --preset Debug/Release, then cmake --build --preset Debug/Release.
 - UART is the only firmware command/data transport. Do not restore USB, CAN, Studio or stdio.
 - Do not add permanent test frameworks. Use temporary checks when explicitly requested.
-- Old tests/tools/Studio/history remain pending deletion because recursive cleanup was blocked.
+- Keep current usage docs only; store generated logs in ignored build directories.

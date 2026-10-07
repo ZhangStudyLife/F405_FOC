@@ -121,7 +121,7 @@ def capture(profile):
                if p.serial_number == "CB832D7DC8A1944B8A2CA4E5A51DD838"]
     assert len(matches) == 1, "Fitted board UART identity not unique"
     out = ROOT / "build/bench_debug" / time.strftime("%Y%m%d_%H%M%S")
-    out.mkdir()
+    out.mkdir(parents=True)
     started = time.perf_counter()
     events = []
     with serial.Serial(matches[0].device, protocol.BAUD, timeout=.025, write_timeout=1) as port, \
