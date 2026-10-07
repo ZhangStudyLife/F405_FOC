@@ -23,6 +23,7 @@
 #include "spi.h"
 #include "tim.h"
 #include "usart.h"
+#include "usb_device.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -97,6 +98,7 @@ int main(void)
   MX_ADC2_Init();
   MX_SPI3_Init();
   MX_USART2_UART_Init();
+  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
   if (!app_init()) {
     app_fault(foc.fault ? foc.fault : FOC_TIMING);
