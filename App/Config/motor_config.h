@@ -16,9 +16,9 @@
 #define MOTOR_ALIGN_VOLTAGE_V 0.6f
 
 /* Low-speed bench candidate; gains are A/rpm and A/(rpm*s). */
-#define MOTOR_SPEED_KP 0.005f
-#define MOTOR_SPEED_KI 0.01f
-#define MOTOR_POSITION_KP 4.0f
+#define MOTOR_SPEED_KP 0.0025f
+#define MOTOR_SPEED_KI 0.005f
+#define MOTOR_POSITION_KP 10.0f
 /* Encoder PLL and speed PI; see App/speed_control.md. */
 #define MOTOR_SPEED_REFERENCE_WEIGHT 0.8f
 #define MOTOR_SPEED_PLL_RAD_S 2000.0f
