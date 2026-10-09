@@ -14,7 +14,7 @@ static unsigned telemetry_divider;
 static volatile uint32_t last_sample;
 static volatile uint32_t command_count, command_result;
 static uint32_t last_command_ms;
-enum { UNKNOWN, STOP, CLEAR, CAL, ZERO, TORQUE, SPEED, POSITION, SET_PARAM, SAVE, MUSIC_PLAY, MUSIC_STOP, MUSIC_PLAY_Q, MUSIC_SONG };
+enum { UNKNOWN, STOP, CLEAR, CAL, ZERO, TORQUE, SPEED, POSITION, SET_PARAM, SAVE, MUSIC_PLAY, MUSIC_STOP, MUSIC_PLAY_Q, MUSIC_SONG, MUSIC_SKIP };
 
 bool app_init(void)
 {
@@ -128,7 +128,9 @@ bool app_command(const char *line)
     else if (!strncmp(line, "Music ", 6) || !strncmp(line, "music ", 6)) {
         command = MUSIC_SONG;
         song = music_find(line + 6);
-        valid = song != NULL;
+        valid = song != NULL || (MUSIC_ENABLE &&
+            (!strcmp(line + 6, "birthdaySong") || !strcmp(line + 6, "Epi")));
+        if (!song) command = MUSIC_SKIP;
     }
     else if (!strncmp(line, "iq ", 3)) { command = TORQUE; valid = parse_decimal(line + 3, &value); }
     else if (!strncmp(line, "rpm ", 4)) { command = SPEED; valid = parse_decimal(line + 4, &value); }
@@ -155,6 +157,7 @@ bool app_command(const char *line)
     uint32_t key = bsp_motor_lock();
     if (valid) switch (command) {
     case STOP: bsp_motor_off(); foc_stop(); break;
+    case MUSIC_SKIP: break; /* Known song omitted from this firmware: no state changes. */
     case MUSIC_PLAY: case MUSIC_PLAY_Q: case MUSIC_SONG:
         valid = MUSIC_ENABLE && foc.calibrated && foc.zero_ready &&
             (foc.state == FOC_IDLE || foc.state == FOC_RUN);
@@ -204,7 +207,7 @@ bool app_command(const char *line)
     case SAVE: valid = foc.state == FOC_IDLE && motor_mode == MOTOR_OFF && foc.calibrated; break;
     default: break;
     }
-    if (valid && foc.state == FOC_PRECHARGE) bsp_motor_arm();
+    if (valid && command != MUSIC_SKIP && foc.state == FOC_PRECHARGE) bsp_motor_arm();
     bsp_motor_unlock(key);
     if (valid && command == SAVE) {
         key = bsp_motor_lock();

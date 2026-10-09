@@ -1,0 +1,18 @@
+#ifndef APP_CONFIG_MUSIC_CONFIG_H
+#define APP_CONFIG_MUSIC_CONFIG_H
+
+#define MUSIC_ENABLE 1
+#define MUSIC_SONG_BIRTHDAY 1
+#define MUSIC_SONG_EPI 2
+/* Only this song is included in Flash; keep both .inc files locally. */
+#define MUSIC_SELECTED_SONG MUSIC_SONG_EPI
+
+#if MUSIC_SELECTED_SONG == MUSIC_SONG_BIRTHDAY
+#define MUSIC_SAMPLE_RATE 10000u
+#elif MUSIC_SELECTED_SONG == MUSIC_SONG_EPI
+#define MUSIC_SAMPLE_RATE 8000u
+#else
+#error "Select MUSIC_SONG_BIRTHDAY or MUSIC_SONG_EPI"
+#endif
+
+#endif

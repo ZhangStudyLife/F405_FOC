@@ -27,13 +27,16 @@ PD2为低电平点亮的命令LED：启动熄灭，完整非空命令亮100 ms�
 | pos 90 | 绝对多圈位置目标，度，范围 ±1000000 |
 | set current_kp 0.55 | 停机时修改一个 RAM 参数 |
 | save | 停机且已有校准时保存到 Flash |
-| Music birthdaySong | 播放完整 36.864 秒生日歌录音波形；停机时以 Iq=0 启动，运行时保留运动目标 |
+| Music Epi | 默认歌曲：《Epilogue》前 60 秒，D 轴播放；停机时以 Iq=0 启动，运行时保留运动目标 |
+| Music birthdaySong | 选择生日歌固件时播放完整 36.864 秒；默认 Epi 固件直接跳过 |
 | music play | 播放一次 C4～C5 音阶；停机时以 Iq=0 启动 FOC，运行时保留运动目标 |
 | music play q | 独立 Q 轴试听，2 A 峰值；只接受零转矩模式且转速低于 5 rpm 的启动请求 |
 | Music stop / music stop | 清除音乐的 Id/Iq 叠加量，保留运动目标和功率状态 |
 
-音乐默认启用；`Music/music.h` 的 `MUSIC_ENABLE` 改为 0 后重新构建，正常运行 Id 目标恒为 0。
-音阶总长 4.8 秒，生日歌总长 36.864 秒；播放一次后 Id 目标归零，关闭功率仍须发 `stop`。
+音乐默认启用；`Config/music_config.h` 的 `MUSIC_ENABLE` 改为 0 后重新构建，正常运行 Id 目标恒为 0。
+同一头文件的 `MUSIC_SELECTED_SONG` 选择 `MUSIC_SONG_EPI` 或 `MUSIC_SONG_BIRTHDAY`，每份固件只包含一首歌曲，两份歌曲文件均保留本地。
+未选中的已知歌曲命令计数并返回成功，但不改变播放、运动目标或功率状态；未知歌曲仍报格式错误。
+音阶总长 4.8 秒，Epi 为 60 秒，生日歌为 36.864 秒；播放一次后 Id 目标归零，关闭功率仍须发 `stop`。
 播放要求零偏和电角度校准有效，无故障；`MUSIC_ENABLE=0` 时拒绝所有播放命令。
 歌曲数据格式、转换工具和命令协议见 [Music/README.md](Music/README.md)。
 正常 `music play` 只注入 D 轴；`music play q` 会产生振动转矩，是单独的静止试听对照。
@@ -136,7 +139,7 @@ Id/Iq尚未有效换算时为NaN，编码器读取失败时通道8为NaN；解�
 - Protocols/JustFloat/justfloat.h：原地补浮点帧尾。
 - Control/control.c：1 kHz 速度 PI、位置 P、目标与反馈状态。
 - FOC/foc.c：20 kHz 电流 PI、坐标变换、SVPWM、校准和保护。
-- Music/：完整生日歌 PCM 波形、C 大调音阶、20 kHz D 轴电流目标，编译开关。
+- Music/：Epi 前一分钟及完整生日歌 PCM 波形、C 大调音阶、20 kHz D 轴电流目标。
 - Hardware/mt6835/：编码器 CRC、角度读取和 SPI DMA。
 - Hardware/bsp/：ADC 采样、PWM/Flash、UART DMA、USB字节收发。
 - Config/：默认限值、七个运行参数。

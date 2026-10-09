@@ -3,12 +3,10 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-
-/* Set to 0 and rebuild to keep the RUN-state Id target at zero. */
-#define MUSIC_ENABLE 1
+#include "music_config.h"
 
 typedef struct { float id, iq, ud, uq; } music_sample_t;
-/* V1: mono 10 kHz signed 12-bit PCM, two samples per three bytes.
+/* Mono MUSIC_SAMPLE_RATE Hz signed 12-bit PCM, two samples per three bytes.
  * data includes two leading and at least four trailing zeros for interpolation. */
 typedef struct { const char *name; const uint8_t *data; unsigned samples; } music_song_t;
 
